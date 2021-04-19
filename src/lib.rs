@@ -6,24 +6,33 @@
 //!
 //! [a]: https://www.osti.gov/servlets/purl/1427291
 
+use crossbeam::epoch::Atomic;
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A wait-free vector based on the paper by Feldman et al. It offers
 /// random-access reads and writes, as well as push/pop operations.
 pub struct FvdVec<T> {
+    data: Atomic<[MaybeUninit<Atomic<T>>]>,
+    length: AtomicUsize,
+    capacity: AtomicUsize,
     phantom: PhantomData<T>,
 }
 
 impl<T> FvdVec<T> {
     /// Creates a new, empty `WFVec<T>`.
     ///
-    /// Until an implementation is provided, this method cannot be `const`.
-    /// (panicking in const fn is still unstable, see [#51999][a])
-    ///
-    /// [a]: https://github.com/rust-lang/rust/issues/51999
+    /// This method ought to be `const`, but there's no const way to create
+    /// an `Atomic<T>` yet.
     pub fn new() -> FvdVec<T> {
-        todo!()
+        FvdVec {
+            data: Atomic::default(),
+            length: AtomicUsize::new(0),
+            capacity: AtomicUsize::new(0),
+            phantom: PhantomData,
+        }
     }
 
     /// Creates a `WFVec<T>` with the given capacity.
@@ -36,7 +45,7 @@ impl<T> FvdVec<T> {
     /// Because this vector is concurrent, the length may change in between
     /// when it is loaded and when it is used.
     pub fn len(&self) -> usize {
-        todo!()
+        self.length.load(Ordering::SeqCst)
     }
 
     /// Checks if the vector is empty.
@@ -46,7 +55,7 @@ impl<T> FvdVec<T> {
 
     /// Gets the current capacity of the vector.
     pub fn capacity(&self) -> usize {
-        todo!()
+        self.capacity.load(Ordering::SeqCst)
     }
 
     /// Reserves space for `additional` values to be inserted in `self`.
