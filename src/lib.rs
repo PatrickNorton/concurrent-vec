@@ -6,19 +6,35 @@
 //!
 //! [a]: https://www.osti.gov/servlets/purl/1427291
 
-use crossbeam::epoch::Atomic;
+mod descr;
+
+use crate::descr::{Node, Value};
+use crossbeam::epoch::{self, Atomic};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{mem, ptr};
 
 /// A wait-free vector based on the paper by Feldman et al. It offers
 /// random-access reads and writes, as well as push/pop operations.
 pub struct FvdVec<T> {
-    data: Atomic<[MaybeUninit<Atomic<T>>]>,
+    // SAFETY GUARANTEES:
+    // * self.data is either null or points to a valid slice.
+    // * * If self.data is null, this vector is empty.
+    // * All values up to self.length are initialized, though maybe with null.
+    // * * We may change this so that array resizing initializes all values
+    //     with Atomic::null(), so that this isn't an issue.
+    data: Atomic<[MaybeUninit<Atomic<Value<T>>>]>,
     length: AtomicUsize,
     capacity: AtomicUsize,
     phantom: PhantomData<T>,
+}
+
+pub struct Ref<'a, T> {
+    parent: &'a FvdVec<T>,
+    value: &'a Node<T>,
 }
 
 impl<T> FvdVec<T> {
@@ -28,7 +44,7 @@ impl<T> FvdVec<T> {
     /// an `Atomic<T>` yet.
     pub fn new() -> FvdVec<T> {
         FvdVec {
-            data: Atomic::default(),
+            data: Atomic::null(),
             length: AtomicUsize::new(0),
             capacity: AtomicUsize::new(0),
             phantom: PhantomData,
@@ -129,6 +145,10 @@ impl<T> FvdVec<T> {
     pub fn remove(&self, index: usize) -> T {
         todo!()
     }
+
+    pub(crate) fn get_spot(&self, index: usize) -> &Atomic<Value<T>> {
+        todo!()
+    }
 }
 
 impl<T: Debug> Debug for FvdVec<T> {
@@ -153,7 +173,44 @@ impl<T: Eq + PartialEq> Eq for FvdVec<T> {}
 
 impl<T> Drop for FvdVec<T> {
     fn drop(&mut self) {
-        todo!()
+        let data = mem::replace(&mut self.data, Atomic::null());
+        // SAFETY: We mutably own this data structure, so there are no other
+        // threads with a reference to it. As such, we really want to be able
+        // to do this check on a value without using an atomic instruction,
+        // but Crossbeam doesn't support that, so here we are.
+        if data
+            .load(Ordering::Relaxed, unsafe { epoch::unprotected() })
+            .is_null()
+        {
+            return;
+        }
+        // SAFETY: We mutably own this data structure, so there are no other
+        // threads containing a reference to it, nor are there any threads
+        // still accessing any owned data. As such, we are allowed to create
+        // an owned value from it. Furthermore, we have determined that it is
+        // not null through the earlier check, and as we own it mutably, we are
+        // sure nobody has modified it in the meantime.
+        let length = *self.length.get_mut();
+        for value in &unsafe { data.into_owned().deref() }[..length] {
+            // SAFETY: Because we can't turn this slice into a box, as it is
+            // unsized, we have to read it from the slice before we can assume
+            // anything. Furthermore, it is guaranteed that all values up to
+            // self.length are initialized (if only with null), so calling
+            // assume_init is safe. Furthermore, since we (still) own the data
+            // structure, we can turn it into an Owned.
+            let value = unsafe {
+                let value = ptr::read(value).assume_init();
+                if value
+                    .load(Ordering::Relaxed, epoch::unprotected())
+                    .is_null()
+                {
+                    continue;
+                }
+                value.into_owned()
+            };
+            // Owned calls the destructor, so we're good here :)
+            drop(value)
+        }
     }
 }
 
