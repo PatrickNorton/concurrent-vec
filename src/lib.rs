@@ -215,33 +215,87 @@ impl<T> From<Vec<T>> for FvdVec<T> {
     }
 }
 
+struct FromIterHelper<T> {
+    // SAFETY: All data in this up to `self.next_elem` is initialized with a
+    // `Value` that has been created with `Value::new_data()`.
+    data: Owned<[MaybeUninit<Atomic<Value<T>>>]>,
+    // SAFETY: `next_elem` always points to the first point in the slice that
+    // is not properly initialized.
+    next_elem: usize,
+}
+
+impl<T> FromIterHelper<T> {
+    pub fn with_capacity(cap: usize) -> FromIterHelper<T> {
+        FromIterHelper {
+            data: Owned::init(cap),
+            next_elem: 0,
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        if self.next_elem >= self.data.len() {
+            let new_cap = (self.data.len() + 1).next_power_of_two();
+            let mut new_data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(new_cap);
+            for (to, from) in new_data.iter_mut().zip(self.data.iter()) {
+                // SAFETY: We're transferring data from the old value
+                // (returning it to its previous, uninit state), and
+                // writing it directly into the new value. Note that
+                // whether or not `from` is initialized has no effect on
+                // the safety of this code.
+                // Furthermore, since this can't panic, there's no
+                // chance of dropping uninitialized data.
+                *to = unsafe { ptr::read(from) }
+            }
+            self.data = new_data;
+        }
+        // As promised, initialized properly.
+        self.data[self.next_elem] = MaybeUninit::new(Atomic::new(Value::new_data(value)));
+        self.next_elem += 1;
+    }
+
+    pub fn take(mut self) -> (Owned<[MaybeUninit<Atomic<Value<T>>>]>, usize) {
+        // SAFETY: Not necessarily unsafe, but this does obey all the given
+        // safety requirements of the type. The data is replaced with a slice
+        // of length 0, and next_elem points at 0, so no uninitialized or
+        // invalid memory is dropped.
+        let len = mem::replace(&mut self.next_elem, 0);
+        let data = mem::replace(&mut self.data, Owned::init(0));
+        (data, len)
+    }
+}
+
+impl<T> Drop for FromIterHelper<T> {
+    fn drop(&mut self) {
+        // Just in case something strange happens, set the length to 0 so we
+        // don't cause UB by dropping something we shouldn't.
+        let next_elem = mem::replace(&mut self.next_elem, 0);
+        for val in &mut self.data[..next_elem] {
+            // SAFETY: Every value up to `self.next_elem` is initialized
+            // properly, as per the contract in the header. Furthermore, as we
+            // are the only ones with access to this struct (see the
+            // `&mut self`), we can turn it into an `Owned` to drop it.
+            // Also, reading from `MaybeUninit` is safe, as long as we don't
+            // call `assume_init` on it later (which we won't).
+            unsafe {
+                let data = ptr::read(val).assume_init().into_owned();
+                debug_assert_eq!(data.tag(), 0);
+                let data = data.into_box().into_data();
+                drop(data);
+            }
+        }
+    }
+}
+
 impl<T> FromIterator<T> for FvdVec<T> {
     fn from_iter<U: IntoIterator<Item = T>>(iter: U) -> Self {
         let iterator = iter.into_iter();
         let size_hint = iterator.size_hint();
-        let mut capacity = size_hint.0;
-        let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(capacity);
-        let mut length = 0;
-        // FIXME: Panicking during this causes a memory leak (`data` is dropped
-        //        without calling `drop()` on its constituent values).
-        for (i, val) in iterator.enumerate() {
-            length += 1;
-            if i >= capacity {
-                let new_cap = (capacity + 1).next_power_of_two();
-                let mut new_data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(new_cap);
-                for (to, from) in new_data.iter_mut().zip(data.iter()) {
-                    // SAFETY: We're transferring data from the old value
-                    // (returning it to its previous, uninit state), and
-                    // writing it directly into the new value. Note that
-                    // whether or not `from` is initialized has no effect on
-                    // the safety of this code.
-                    *to = unsafe { ptr::read(from) }
-                }
-                data = new_data;
-                capacity = new_cap;
-            }
-            data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
+        let mut helper = FromIterHelper::with_capacity(size_hint.0);
+        for val in iterator {
+            helper.push(val)
         }
+        let capacity = helper.data.len();
+        let (data, length) = helper.take();
         FvdVec {
             data: Atomic::from(data),
             length: AtomicUsize::new(length),
@@ -288,8 +342,13 @@ impl<T> Drop for FvdVec<T> {
                 }
                 value.into_owned()
             };
-            // Owned calls the destructor, so we're good here :)
-            drop(value)
+            // SAFETY: `value` follows the tag convention.
+            // The `into_enum` call is necessary because otherwise we'd be
+            // dropping a `MaybeUninit` (contained in the union), which does
+            // not call `drop` on its contained value.
+            unsafe {
+                drop(Value::into_enum(value));
+            }
         }
     }
 }
@@ -311,5 +370,10 @@ mod tests {
     #[test]
     fn capacity() {
         assert_eq!(FvdVec::<()>::with_capacity(10).capacity(), 10)
+    }
+
+    #[test]
+    fn test_create() {
+        assert_eq!(vec![0, 1, 2, 3].into_iter().collect::<FvdVec<_>>().len(), 4)
     }
 }

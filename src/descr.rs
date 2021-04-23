@@ -22,6 +22,11 @@ pub union Value<T> {
     push: ManuallyDrop<Descriptor<T>>,
 }
 
+pub enum ValueEnum<T> {
+    Data(Node<T>),
+    Push(Descriptor<T>),
+}
+
 pub struct Node<T> {
     pub val: T,
     ref_count: AtomicUsize,
@@ -53,6 +58,27 @@ impl<T> Value<T> {
         Value {
             data: ManuallyDrop::new(Node::new(value)),
         }
+    }
+
+    /// Takes the `Value` and turns it into an enum.
+    ///
+    /// SAFETY: The `Owned` must follow the tag convention for
+    /// `Owned<Value<T>>`.
+    #[allow(clippy::wrong_self_convention)]
+    pub unsafe fn into_enum(this: Owned<Value<T>>) -> ValueEnum<T> {
+        if this.tag() == 0 {
+            ValueEnum::Data(ManuallyDrop::into_inner(this.into_box().data))
+        } else {
+            ValueEnum::Push(ManuallyDrop::into_inner(this.into_box().push))
+        }
+    }
+
+    /// Takes the `Value` and turns it into its data component.
+    ///
+    /// SAFETY: This must be known to contain a `Node`, and may not contain a
+    /// descriptor.
+    pub unsafe fn into_data(self) -> Node<T> {
+        ManuallyDrop::into_inner(self.data)
     }
 }
 
