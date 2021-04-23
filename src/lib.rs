@@ -9,8 +9,10 @@
 mod descr;
 
 use crate::descr::{Node, Value};
-use crossbeam::epoch::{self, Atomic};
+use crossbeam::epoch::{self, Atomic, Owned};
+use std::array::IntoIter;
 use std::fmt::{self, Debug, Formatter};
+use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
@@ -53,7 +55,12 @@ impl<T> FvdVec<T> {
 
     /// Creates a `WFVec<T>` with the given capacity.
     pub fn with_capacity(cap: usize) -> FvdVec<T> {
-        todo!()
+        FvdVec {
+            data: Atomic::init(cap),
+            length: AtomicUsize::new(0),
+            capacity: AtomicUsize::new(cap),
+            phantom: PhantomData,
+        }
     }
 
     /// Gets the length of the vector.
@@ -171,6 +178,79 @@ impl<T: PartialEq> PartialEq for FvdVec<T> {
 
 impl<T: Eq + PartialEq> Eq for FvdVec<T> {}
 
+impl<T, const N: usize> From<[T; N]> for FvdVec<T> {
+    fn from(x: [T; N]) -> Self {
+        let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(N);
+        for (i, val) in IntoIter::new(x).enumerate() {
+            data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
+        }
+        FvdVec {
+            data: Atomic::from(data),
+            length: AtomicUsize::new(N),
+            capacity: AtomicUsize::new(N),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> From<Box<[T]>> for FvdVec<T> {
+    fn from(x: Box<[T]>) -> Self {
+        Vec::from(x).into()
+    }
+}
+
+impl<T> From<Vec<T>> for FvdVec<T> {
+    fn from(x: Vec<T>) -> Self {
+        let len = x.len();
+        let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(len);
+        for (i, val) in x.into_iter().enumerate() {
+            data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
+        }
+        FvdVec {
+            data: Atomic::from(data),
+            length: AtomicUsize::new(len),
+            capacity: AtomicUsize::new(len),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> FromIterator<T> for FvdVec<T> {
+    fn from_iter<U: IntoIterator<Item = T>>(iter: U) -> Self {
+        let iterator = iter.into_iter();
+        let size_hint = iterator.size_hint();
+        let mut capacity = size_hint.0;
+        let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(capacity);
+        let mut length = 0;
+        // FIXME: Panicking during this causes a memory leak (`data` is dropped
+        //        without calling `drop()` on its constituent values).
+        for (i, val) in iterator.enumerate() {
+            length += 1;
+            if i >= capacity {
+                let new_cap = (capacity + 1).next_power_of_two();
+                let mut new_data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(new_cap);
+                for (to, from) in new_data.iter_mut().zip(data.iter()) {
+                    // SAFETY: We're transferring data from the old value
+                    // (returning it to its previous, uninit state), and
+                    // writing it directly into the new value. Note that
+                    // whether or not `from` is initialized has no effect on
+                    // the safety of this code.
+                    *to = unsafe { ptr::read(from) }
+                }
+                data = new_data;
+                capacity = new_cap;
+            }
+            data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
+        }
+        FvdVec {
+            data: Atomic::from(data),
+            length: AtomicUsize::new(length),
+            capacity: AtomicUsize::new(capacity),
+            phantom: PhantomData,
+        }
+    }
+}
+
 impl<T> Drop for FvdVec<T> {
     fn drop(&mut self) {
         let data = mem::replace(&mut self.data, Atomic::null());
@@ -221,5 +301,15 @@ mod tests {
     #[test]
     fn test_new() {
         assert!(FvdVec::<()>::new().is_empty())
+    }
+
+    #[test]
+    fn length() {
+        assert_eq!(FvdVec::from([0, 1, 2, 3]).len(), 4)
+    }
+
+    #[test]
+    fn capacity() {
+        assert_eq!(FvdVec::<()>::with_capacity(10).capacity(), 10)
     }
 }

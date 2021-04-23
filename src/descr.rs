@@ -48,6 +48,24 @@ pub struct PopSubDescr {}
 #[repr(align(2))]
 struct Align2;
 
+impl<T> Value<T> {
+    pub fn new_data(value: T) -> Value<T> {
+        Value {
+            data: ManuallyDrop::new(Node::new(value)),
+        }
+    }
+}
+
+impl<T> Node<T> {
+    pub fn new(value: T) -> Node<T> {
+        Node {
+            val: value,
+            ref_count: AtomicUsize::new(1),
+            _align: Align2,
+        }
+    }
+}
+
 impl<T> Descriptor<T> {
     /// Calls the `complete()` function for the given descriptor.
     ///
