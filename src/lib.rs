@@ -199,6 +199,7 @@ impl<T> IntoIterator for FvdVec<T> {
             let data = mem::replace(&mut self.data, Atomic::null());
             let end = mem::replace(self.length.get_mut(), 0);
             *self.capacity.get_mut() = 0;
+            mem::forget(self);
             IntoIter::from_parts(data.into_owned(), end)
         }
     }
