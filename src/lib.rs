@@ -7,17 +7,18 @@
 //! [a]: https://www.osti.gov/servlets/purl/1427291
 
 mod descr;
+mod iter;
 
 use crate::descr::{Node, Value};
+use crate::iter::IntoIter;
 use crossbeam::epoch::{self, Atomic, Owned};
-use std::array::IntoIter;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{mem, ptr};
+use std::{array, mem, ptr};
 
 /// A wait-free vector based on the paper by Feldman et al. It offers
 /// random-access reads and writes, as well as push/pop operations.
@@ -178,10 +179,35 @@ impl<T: PartialEq> PartialEq for FvdVec<T> {
 
 impl<T: Eq + PartialEq> Eq for FvdVec<T> {}
 
+impl<T> IntoIterator for FvdVec<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        // SAFETY: We own the struct, so we can turn `self.data` into an
+        // `Owned`. Furthermore, when we replace the data, we reset `self` to
+        // be equivalent to an empty vector, so dropping it is still safe
+        // (Since we implement `Drop`, we can't just move out). Furthermore,
+        // just in case, we call `mem::forget` on `self`, to not accidentally
+        // double-free. This won't leak because we now own no heap-allocated
+        // memory anymore. Calling `IntoIter::from_parts` is safe because
+        // `self.data` is always initialized up to `self.capacity`, which is
+        // what we're passing as `data` and `end`, all values in `data` follow
+        // the tag convention, and there are no initialized values beyond
+        // `end`.
+        unsafe {
+            let data = mem::replace(&mut self.data, Atomic::null());
+            let end = mem::replace(self.length.get_mut(), 0);
+            *self.capacity.get_mut() = 0;
+            IntoIter::from_parts(data.into_owned(), end)
+        }
+    }
+}
+
 impl<T, const N: usize> From<[T; N]> for FvdVec<T> {
     fn from(x: [T; N]) -> Self {
         let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(N);
-        for (i, val) in IntoIter::new(x).enumerate() {
+        for (i, val) in array::IntoIter::new(x).enumerate() {
             data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
         }
         FvdVec {
@@ -356,6 +382,7 @@ impl<T> Drop for FvdVec<T> {
 #[cfg(test)]
 mod tests {
     use crate::FvdVec;
+    use std::array;
 
     #[test]
     fn test_new() {
@@ -375,5 +402,14 @@ mod tests {
     #[test]
     fn test_create() {
         assert_eq!(vec![0, 1, 2, 3].into_iter().collect::<FvdVec<_>>().len(), 4)
+    }
+
+    #[test]
+    fn into_iter() {
+        let values = [0, 1, 2, 3];
+        let vec: FvdVec<_> = values.into();
+        for (i, j) in vec.into_iter().zip(array::IntoIter::new(values)) {
+            assert_eq!(i, j);
+        }
     }
 }
