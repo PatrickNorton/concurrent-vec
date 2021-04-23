@@ -219,7 +219,7 @@ mod tests {
     use crate::FvdVec;
 
     #[test]
-    fn it_works() {
+    fn test_new() {
         assert!(FvdVec::<()>::new().is_empty())
     }
 }

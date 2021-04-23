@@ -49,9 +49,27 @@ pub struct PopSubDescr {}
 struct Align2;
 
 impl<T> Descriptor<T> {
-    pub fn complete(&self, pos: usize, value: &FvdVec<T>) -> bool {
+    /// Calls the `complete()` function for the given descriptor.
+    ///
+    /// SAFETY: To be safe, `this.deref()` must be safe, and `this.deref()`
+    /// must point to a valid Descriptor value.
+    pub unsafe fn complete_unchecked(
+        this: Shared<Value<T>>,
+        pos: usize,
+        value: &FvdVec<T>,
+    ) -> bool {
+        assert!(is_descr(this));
+        this.deref().push.complete_inner(pos, value, this)
+    }
+
+    pub fn complete_inner(
+        &self,
+        pos: usize,
+        value: &FvdVec<T>,
+        shared_self: Shared<Value<T>>,
+    ) -> bool {
         match self {
-            Descriptor::Push(push) => push.complete(pos, value, Shared::null()),
+            Descriptor::Push(push) => push.complete(pos, value, shared_self),
             Descriptor::Pop(pop) => pop.complete(pos, value),
             Descriptor::PopSub(pop_sub) => pop_sub.complete(pos, value),
         }
@@ -76,10 +94,11 @@ impl<T> PushDescr<T> {
                     Ordering::SeqCst,
                 );
             }
-            // SAFETY: We know current is a descriptor as per the `is_descr()` call
-            // earlier.
-            // FIXME? How do we know this is safe to deref in the first place?
-            unsafe { current.deref().push.complete(pos - 1, value) };
+            // SAFETY: We know current is a descriptor as per the `is_descr()`
+            // call earlier.
+            // This is safe to dereference because if is_descr() succeeds, then
+            // the Shared points to a valid descriptor.
+            unsafe { Descriptor::complete_unchecked(current, pos - 1, value) };
             current = spot_2.load(Ordering::SeqCst, guard);
         }
         if self.state.load(Ordering::SeqCst) == UNDECIDED {
