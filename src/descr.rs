@@ -154,6 +154,10 @@ impl<T> PushDescr<T> {
             );
         }
         if self.state.load(Ordering::SeqCst) == PASSED {
+            // Note that while `self.value.take()` may call a spinlock (and
+            // thus not be lock-free), that would require `Option<Box<T>>` to
+            // not be atomically-sized (it should always be one machine word),
+            // which is not the case on any platform I know of.
             if let Option::Some(x) = self.value.take() {
                 let value = Owned::from(x);
                 let _ = spot.compare_exchange(
