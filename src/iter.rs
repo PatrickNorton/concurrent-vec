@@ -1,7 +1,8 @@
 use crate::descr::{Value, ValueEnum};
 use crate::Data;
-use crossbeam::epoch::Owned;
+use crossbeam::epoch::{self, Owned};
 use std::ptr;
+use std::sync::atomic::Ordering;
 
 pub struct IntoIter<T> {
     data: Owned<Data<T>>,
@@ -37,12 +38,22 @@ impl<T> Iterator for IntoIter<T> {
                 // * The `Owned` we get follows the tag convention for values,
                 //   so turning it into an enum is safe.
                 unsafe {
+                    let atomic = ptr::read(&self.data[self.next - 1]).assume_init();
+                    // Skip over null values. There should be an easier way to
+                    // do this, but there isn't. We can use `unprotected`
+                    // because we have a mutable reference, so it won't be
+                    // dropped. This branch probably shouldn't ever be taken,
+                    // as we have a mutable reference to self, so all
+                    // operations should be finished, but I'm not 100% sure,
+                    // and this way there's no UB.
+                    if atomic
+                        .load(Ordering::Relaxed, &epoch::unprotected())
+                        .is_null()
+                    {
+                        continue;
+                    }
                     self.next += 1;
-                    match Value::into_enum(
-                        ptr::read(&self.data[self.next - 1])
-                            .assume_init()
-                            .into_owned(),
-                    ) {
+                    match Value::into_enum(atomic.into_owned()) {
                         ValueEnum::Data(d) => return Option::Some(d.val),
                         // In theory, these shouldn't exist (all descriptor-
                         // based operations should have finished well before
