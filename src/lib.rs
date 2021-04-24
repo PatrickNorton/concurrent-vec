@@ -29,6 +29,8 @@ pub struct FvdVec<T> {
     // * All values up to self.length are initialized, though maybe with null.
     // * * We may change this so that array resizing initializes all values
     //     with Atomic::null(), so that this isn't an issue.
+    // * All `Atomic<Value<T>>` that are non-null and non-`NOT_VALUE` follow
+    //   the tag convention.
     data: Atomic<[MaybeUninit<Atomic<Value<T>>>]>,
     length: AtomicUsize,
     capacity: AtomicUsize,
