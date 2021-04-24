@@ -173,7 +173,15 @@ impl<T> Default for FvdVec<T> {
 
 impl<T: PartialEq> PartialEq for FvdVec<T> {
     fn eq(&self, other: &Self) -> bool {
-        todo!()
+        if ptr::eq(self, other) {
+            // Fast path to prevent full iteration.
+            // If this weren't here, it could be the case that comparing a
+            // value with itself would return false b/c of the value being
+            // changed out from under us while the comparison is happening.
+            true
+        } else {
+            todo!()
+        }
     }
 }
 
