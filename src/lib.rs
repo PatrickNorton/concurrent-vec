@@ -20,6 +20,8 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{array, mem, ptr};
 
+type Data<T> = [MaybeUninit<Atomic<Value<T>>>];
+
 /// A wait-free vector based on the paper by Feldman et al. It offers
 /// random-access reads and writes, as well as push/pop operations.
 pub struct FvdVec<T> {
@@ -31,7 +33,7 @@ pub struct FvdVec<T> {
     //     with Atomic::null(), so that this isn't an issue.
     // * All `Atomic<Value<T>>` that are non-null and non-`NOT_VALUE` follow
     //   the tag convention.
-    data: Atomic<[MaybeUninit<Atomic<Value<T>>>]>,
+    data: Atomic<Data<T>>,
     length: AtomicUsize,
     capacity: AtomicUsize,
     phantom: PhantomData<T>,
@@ -217,7 +219,7 @@ impl<T> IntoIterator for FvdVec<T> {
 
 impl<T, const N: usize> From<[T; N]> for FvdVec<T> {
     fn from(x: [T; N]) -> Self {
-        let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(N);
+        let mut data = Owned::<Data<T>>::init(N);
         for (i, val) in array::IntoIter::new(x).enumerate() {
             data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
         }
@@ -239,7 +241,7 @@ impl<T> From<Box<[T]>> for FvdVec<T> {
 impl<T> From<Vec<T>> for FvdVec<T> {
     fn from(x: Vec<T>) -> Self {
         let len = x.len();
-        let mut data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(len);
+        let mut data = Owned::<Data<T>>::init(len);
         for (i, val) in x.into_iter().enumerate() {
             data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
         }
@@ -255,7 +257,7 @@ impl<T> From<Vec<T>> for FvdVec<T> {
 struct FromIterHelper<T> {
     // SAFETY: All data in this up to `self.next_elem` is initialized with a
     // `Value` that has been created with `Value::new_data()`.
-    data: Owned<[MaybeUninit<Atomic<Value<T>>>]>,
+    data: Owned<Data<T>>,
     // SAFETY: `next_elem` always points to the first point in the slice that
     // is not properly initialized.
     next_elem: usize,
@@ -272,7 +274,7 @@ impl<T> FromIterHelper<T> {
     pub fn push(&mut self, value: T) {
         if self.next_elem >= self.data.len() {
             let new_cap = (self.data.len() + 1).next_power_of_two();
-            let mut new_data = Owned::<[MaybeUninit<Atomic<Value<T>>>]>::init(new_cap);
+            let mut new_data = Owned::<Data<T>>::init(new_cap);
             for (to, from) in new_data.iter_mut().zip(self.data.iter()) {
                 // SAFETY: We're transferring data from the old value
                 // (returning it to its previous, uninit state), and
@@ -290,7 +292,7 @@ impl<T> FromIterHelper<T> {
         self.next_elem += 1;
     }
 
-    pub fn take(mut self) -> (Owned<[MaybeUninit<Atomic<Value<T>>>]>, usize) {
+    pub fn take(mut self) -> (Owned<Data<T>>, usize) {
         // SAFETY: Not necessarily unsafe, but this does obey all the given
         // safety requirements of the type. The data is replaced with a slice
         // of length 0, and next_elem points at 0, so no uninitialized or

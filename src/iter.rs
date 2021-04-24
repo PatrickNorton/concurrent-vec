@@ -1,10 +1,10 @@
 use crate::descr::{Value, ValueEnum};
-use crossbeam::epoch::{Atomic, Owned};
-use std::mem::MaybeUninit;
+use crate::Data;
+use crossbeam::epoch::Owned;
 use std::ptr;
 
 pub struct IntoIter<T> {
-    data: Owned<[MaybeUninit<Atomic<Value<T>>>]>,
+    data: Owned<Data<T>>,
     next: usize,
     end: usize,
 }
@@ -16,10 +16,7 @@ impl<T> IntoIter<T> {
     /// * `data` must be initialized from 0 to `end`.
     /// * All `Atomic`s in `data` must follow the tag convention.
     /// * Any initialized values in slots `end..` will not be dropped.
-    pub unsafe fn from_parts(
-        data: Owned<[MaybeUninit<Atomic<Value<T>>>]>,
-        end: usize,
-    ) -> IntoIter<T> {
+    pub unsafe fn from_parts(data: Owned<Data<T>>, end: usize) -> IntoIter<T> {
         IntoIter { data, next: 0, end }
     }
 }
