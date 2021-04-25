@@ -158,6 +158,11 @@ impl<T> PushDescr<T> {
             // thus not be lock-free), that would require `Option<Box<T>>` to
             // not be atomically-sized (it should always be one machine word),
             // which is not the case on any platform I know of.
+            //
+            // If `self.value` is None, then the compare-exchange should fail,
+            // because somebody else must have taken it (and presumably swapped
+            // it in). If the take fails but the compare_exchange succeeds,
+            // something strange has happened, but the value will be lost.
             if let Option::Some(x) = self.value.take() {
                 let value = Owned::from(x);
                 let _ = spot.compare_exchange(
