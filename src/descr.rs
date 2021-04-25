@@ -11,8 +11,6 @@ const PASSED: u8 = 2;
 
 const LIMIT: usize = 32;
 
-const NOT_VALUE: usize = usize::MAX;
-
 /// A holder for the value in a `FvdVec`.
 ///
 /// Note that the variant in use should be determined by the tag on the
@@ -148,7 +146,7 @@ impl<T> PushDescr<T> {
         if self.state.load(Ordering::SeqCst) == UNDECIDED {
             let _ = self.state.compare_exchange(
                 UNDECIDED,
-                if is_value(current) { PASSED } else { FAILED },
+                if !current.is_null() { PASSED } else { FAILED },
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             );
@@ -176,8 +174,7 @@ impl<T> PushDescr<T> {
         } else {
             let _ = spot.compare_exchange(
                 shared_self,
-                // SAFETY: Pointers that are NOT_VALUE are never actually used
-                unsafe { Shared::from_usize(NOT_VALUE) },
+                Shared::null(),
                 Ordering::SeqCst,
                 Ordering::SeqCst,
                 guard,
@@ -215,12 +212,7 @@ pub unsafe fn decompose<T>(value: Shared<Value<T>>) -> Result<&Node<T>, &Descrip
 
 #[inline]
 fn is_descr<T>(current: Shared<Value<T>>) -> bool {
-    current.tag() == 1 && is_value(current) && !current.is_null()
-}
-
-#[inline]
-fn is_value<T>(current: Shared<Value<T>>) -> bool {
-    current.into_usize() != NOT_VALUE
+    current.tag() == 1 && !current.is_null()
 }
 
 /// Increments the given value atomically if it is not 0.
