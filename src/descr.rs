@@ -1,4 +1,4 @@
-use crate::FvdVec;
+use crate::{FvdVec, LIMIT};
 use crossbeam::atomic::AtomicCell;
 use crossbeam::epoch;
 use crossbeam::epoch::{Owned, Pointer, Shared};
@@ -8,8 +8,6 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 const UNDECIDED: u8 = 0;
 const FAILED: u8 = 1;
 const PASSED: u8 = 2;
-
-const LIMIT: usize = 32;
 
 /// A holder for the value in a `FvdVec`.
 ///
@@ -58,6 +56,12 @@ impl<T> Value<T> {
         }
     }
 
+    pub fn new_descriptor(value: Descriptor<T>) -> Value<T> {
+        Value {
+            push: ManuallyDrop::new(value),
+        }
+    }
+
     /// Takes the `Value` and turns it into an enum.
     ///
     /// SAFETY: The `Owned` must follow the tag convention for
@@ -77,6 +81,10 @@ impl<T> Value<T> {
     /// descriptor.
     pub unsafe fn into_data(self) -> Node<T> {
         ManuallyDrop::into_inner(self.data)
+    }
+    
+    pub unsafe fn as_descriptor(&self) -> &Descriptor<T> {
+        &self.push
     }
 }
 
@@ -119,6 +127,22 @@ impl<T> Descriptor<T> {
 }
 
 impl<T> PushDescr<T> {
+    pub fn new(value: T) -> PushDescr<T> {
+        PushDescr {
+            state: AtomicU8::new(UNDECIDED),
+            value: AtomicCell::new(Option::Some(Box::new(Value::new_data(value)))),
+        }
+    }
+
+    /// SAFETY: The †ag convention must be followed and `value` must be
+    /// inhabited by a `Node`.
+    pub unsafe fn new_value(value: Owned<Value<T>>) -> PushDescr<T> {
+        PushDescr {
+            state: AtomicU8::new(UNDECIDED),
+            value: AtomicCell::new(Option::Some(value.into_box())),
+        }
+    }
+
     pub fn complete(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
         assert_eq!(self as *const _ as usize, shared_self.into_usize());
         let guard = &epoch::pin();
@@ -211,7 +235,7 @@ pub unsafe fn decompose<T>(value: Shared<Value<T>>) -> Result<&Node<T>, &Descrip
 }
 
 #[inline]
-fn is_descr<T>(current: Shared<Value<T>>) -> bool {
+pub fn is_descr<T>(current: Shared<Value<T>>) -> bool {
     current.tag() == 1 && !current.is_null()
 }
 

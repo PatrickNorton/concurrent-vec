@@ -9,7 +9,7 @@
 mod descr;
 mod iter;
 
-use crate::descr::{Node, Value};
+use crate::descr::{is_descr, Descriptor, Node, PushDescr, Value};
 use crate::iter::IntoIter;
 use crossbeam::epoch::{self, Atomic, Owned};
 use std::fmt::{self, Debug, Formatter};
@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{array, mem, ptr};
 
 type Data<T> = [MaybeUninit<Atomic<Value<T>>>];
+
+const LIMIT: usize = 32;
 
 /// A wait-free vector based on the paper by Feldman et al. It offers
 /// random-access reads and writes, as well as push/pop operations.
@@ -95,7 +97,75 @@ impl<T> FvdVec<T> {
     ///
     /// This corresponds to the `cas_pushBack` method from the paper.
     pub fn push(&self, value: T) {
-        todo!()
+        let mut value = Option::Some(Owned::new(Value::new_data(value)));
+        let mut pos = self.length.load(Ordering::SeqCst);
+        let mut failures = 0;
+        let guard = &epoch::pin();
+        loop {
+            failures += 1;
+            if failures > LIMIT {
+                todo!("announce_op(PushOp(value))")
+            }
+            let mut spot = self.get_spot(pos);
+            let expected = spot.load(Ordering::SeqCst, guard);
+            if expected.is_null() {
+                if pos == 0 {
+                    match spot.compare_exchange(
+                        expected,
+                        value.take().unwrap(),
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        guard,
+                    ) {
+                        Result::Ok(_) => {
+                            self.increment_size();
+                            return;
+                        }
+                        Result::Err(e) => {
+                            pos += 1;
+                            spot = self.get_spot(pos);
+                            value = Option::Some(e.new)
+                        }
+                    }
+                }
+                // SAFETY: PushDescr is always a Value created from `Value::new_data`.
+                let ph = unsafe { PushDescr::new_value(value.take().unwrap()) };
+                let value = Value::new_descriptor(Descriptor::Push(ph));
+                let owned = Owned::new(value).with_tag(1);
+                match spot.compare_exchange(
+                    expected,
+                    owned,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                ) {
+                    Result::Ok(val) => {
+                        // SAFETY: We know there's a descriptor in this and it
+                        // follows the tag convention (b/c we just put it
+                        // there).
+                        let result = unsafe { Descriptor::complete_unchecked(val, pos, &self) };
+                        if result {
+                            self.increment_size();
+                            return;
+                        } else {
+                            // TODO: Once this fails, we need to somehow be
+                            //       able to get the value back to try again.
+                            //       In particular, we'd have to prevent drop()
+                            //       from running on the value in the
+                            //       descriptor.
+                            todo!("Create new PushDescr; pos -= 1")
+                        }
+                    }
+                    Result::Err(_) => {}
+                }
+            } else if is_descr(expected) {
+                // SAFETY: We just checked there's a descriptor and expected
+                // follows the tag convention.
+                unsafe { Descriptor::complete_unchecked(expected, pos, &self) };
+            } else {
+                pos += 1;
+            }
+        }
     }
 
     /// Removes an element from the end of the vector.
@@ -160,6 +230,10 @@ impl<T> FvdVec<T> {
 
     pub(crate) fn get_spot(&self, index: usize) -> &Atomic<Value<T>> {
         todo!()
+    }
+
+    fn increment_size(&self) {
+        self.length.fetch_add(1, Ordering::SeqCst);
     }
 }
 
