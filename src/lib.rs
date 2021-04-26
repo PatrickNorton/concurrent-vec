@@ -146,6 +146,13 @@ impl<T> FvdVec<T> {
                         let result = unsafe { Descriptor::complete_unchecked(val, pos, &self) };
                         if result {
                             self.increment_size();
+                            // SAFETY: The guard has fulfilled its purpose, so
+                            // it is no longer accessible from the vector. As
+                            // such, no other thread can get it after it is
+                            // destroyed. Since we put the guard into the
+                            // vector, we are the ones responsible for getting
+                            // rid of it.
+                            unsafe { guard.defer_destroy(val) };
                             return;
                         } else {
                             // TODO: Once this fails, we need to somehow be
