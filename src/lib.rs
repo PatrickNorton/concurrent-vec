@@ -94,12 +94,15 @@ impl<T> FvdVec<T> {
     }
 
     /// Appends an element to the end of the vector.
-    ///
-    /// This corresponds to the `cas_pushBack` method from the paper.
     pub fn push(&self, value: T) {
-        let mut value = Option::Some(Owned::new(Value::new_data(value)));
+        let value = Atomic::new(Value::new_data(value));
         let mut pos = self.length.load(Ordering::SeqCst);
         let mut failures = 0;
+        // SAFETY:
+        //  * PushDescr is always a Value created from `Value::new_data`.
+        //  * If the descriptor completes successfully, then we return
+        //    immediately and the destructor is not called.
+        let mut ph = unsafe { PushDescr::new_value(value.clone()) };
         let guard = &epoch::pin();
         loop {
             failures += 1;
@@ -112,7 +115,7 @@ impl<T> FvdVec<T> {
                 if pos == 0 {
                     match spot.compare_exchange(
                         expected,
-                        value.take().unwrap(),
+                        value.load(Ordering::SeqCst, guard),
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                         guard,
@@ -121,17 +124,14 @@ impl<T> FvdVec<T> {
                             self.increment_size();
                             return;
                         }
-                        Result::Err(e) => {
+                        Result::Err(_) => {
                             pos += 1;
                             spot = self.get_spot(pos);
-                            value = Option::Some(e.new)
                         }
                     }
                 }
-                // SAFETY: PushDescr is always a Value created from `Value::new_data`.
-                let ph = unsafe { PushDescr::new_value(value.take().unwrap()) };
-                let value = Value::new_descriptor(Descriptor::Push(ph));
-                let owned = Owned::new(value).with_tag(1);
+                let value_desc = Value::new_descriptor(Descriptor::Push(ph));
+                let owned = Owned::new(value_desc).with_tag(1);
                 match spot.compare_exchange(
                     expected,
                     owned,
@@ -152,18 +152,29 @@ impl<T> FvdVec<T> {
                             // destroyed. Since we put the guard into the
                             // vector, we are the ones responsible for getting
                             // rid of it.
+                            // NOTE: We can't use `value` from here on out,
+                            // because the descriptor took it.
                             unsafe { guard.defer_destroy(val) };
                             return;
                         } else {
-                            // TODO: Once this fails, we need to somehow be
-                            //       able to get the value back to try again.
-                            //       In particular, we'd have to prevent drop()
-                            //       from running on the value in the
-                            //       descriptor.
-                            todo!("Create new PushDescr; pos -= 1")
+                            pos -= 1;
+                            // SAFETY: The guard has fulfilled its purpose, so
+                            // it is no longer accessible from the vector. As
+                            // such, no other thread can get it after it is
+                            // destroyed. Since we put the guard into the
+                            // vector, we are the ones responsible for getting
+                            // rid of it.
+                            unsafe { guard.defer_destroy(val) };
+                            // SAFETY: PushDescr is always a Value created from
+                            // `Value::new_data`.
+                            ph = unsafe { PushDescr::new_value(value.clone()) };
                         }
                     }
-                    Result::Err(_) => {}
+                    Result::Err(_) => {
+                        // SAFETY: PushDescr is always a Value created from
+                        // `Value::new_data`.
+                        ph = unsafe { PushDescr::new_value(value.clone()) };
+                    }
                 }
             } else if is_descr(expected) {
                 // SAFETY: We just checked there's a descriptor and expected

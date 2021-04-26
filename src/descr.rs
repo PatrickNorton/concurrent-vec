@@ -1,7 +1,5 @@
 use crate::{FvdVec, LIMIT};
-use crossbeam::atomic::AtomicCell;
-use crossbeam::epoch;
-use crossbeam::epoch::{Owned, Pointer, Shared};
+use crossbeam::epoch::{self, Atomic, Owned, Pointer, Shared};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -39,7 +37,10 @@ pub struct PushDescr<T> {
     state: AtomicU8,
     // SAFETY: self.value may *not* contain a descriptor (this is here to
     // prevent reallocation when the value is moved into the vec).
-    value: AtomicCell<Option<Box<Value<T>>>>,
+    // Once `self.state` is inhabited by `FAILED` or `PASSED`, then this
+    // descriptor will not access `self.value`. In particular, this means that
+    // `drop()` will never be called on the inhabitant of `value`.
+    value: Atomic<Value<T>>,
 }
 
 pub struct PopDescr {}
@@ -82,7 +83,7 @@ impl<T> Value<T> {
     pub unsafe fn into_data(self) -> Node<T> {
         ManuallyDrop::into_inner(self.data)
     }
-    
+
     pub unsafe fn as_descriptor(&self) -> &Descriptor<T> {
         &self.push
     }
@@ -112,12 +113,7 @@ impl<T> Descriptor<T> {
         this.deref().push.complete_inner(pos, value, this)
     }
 
-    pub fn complete_inner(
-        &self,
-        pos: usize,
-        value: &FvdVec<T>,
-        shared_self: Shared<Value<T>>,
-    ) -> bool {
+    fn complete_inner(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
         match self {
             Descriptor::Push(push) => push.complete(pos, value, shared_self),
             Descriptor::Pop(pop) => pop.complete(pos, value),
@@ -127,19 +123,15 @@ impl<T> Descriptor<T> {
 }
 
 impl<T> PushDescr<T> {
-    pub fn new(value: T) -> PushDescr<T> {
-        PushDescr {
-            state: AtomicU8::new(UNDECIDED),
-            value: AtomicCell::new(Option::Some(Box::new(Value::new_data(value)))),
-        }
-    }
-
     /// SAFETY: The †ag convention must be followed and `value` must be
-    /// inhabited by a `Node`.
-    pub unsafe fn new_value(value: Owned<Value<T>>) -> PushDescr<T> {
+    /// inhabited by a `Node`. Furthermore, if `self.complete()` returns
+    /// `true`, then this *must* have exclusive access to `value`. If it
+    /// returns `false`, then access is relinquished and another thread
+    /// may access it, e.g. in order to call `drop()`.
+    pub unsafe fn new_value(value: Atomic<Value<T>>) -> PushDescr<T> {
         PushDescr {
             state: AtomicU8::new(UNDECIDED),
-            value: AtomicCell::new(Option::Some(value.into_box())),
+            value,
         }
     }
 
@@ -176,25 +168,23 @@ impl<T> PushDescr<T> {
             );
         }
         if self.state.load(Ordering::SeqCst) == PASSED {
-            // Note that while `self.value.take()` may call a spinlock (and
-            // thus not be lock-free), that would require `Option<Box<T>>` to
-            // not be atomically-sized (it should always be one machine word),
-            // which is not the case on any platform I know of.
-            //
-            // If `self.value` is None, then the compare-exchange should fail,
-            // because somebody else must have taken it (and presumably swapped
-            // it in). If the take fails but the compare_exchange succeeds,
-            // something strange has happened, but the value will be lost.
-            if let Option::Some(x) = self.value.take() {
-                let value = Owned::from(x);
-                let _ = spot.compare_exchange(
-                    shared_self,
-                    value,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                    guard,
-                );
-            }
+            // NOTE: While there is no `unsafe` here, it should be noted that
+            // once this is passed over, we no longer "own" the value, so we
+            // may not do anything with it, including drop it.
+            // FIXME: This may cause a memory leak if `spot` is swapped out
+            //  with a different value (e.g. not the value in `self.value`)
+            //  before this compare_exchange. While it would be nice to just
+            //  call `drop` if the swap fails, that won't account for the fact
+            //  that the value could have already been successfully swapped in
+            //  (which would cause a failure). I'm not sure it's possible to
+            //  deal with this properly.
+            let _ = spot.compare_exchange(
+                shared_self,
+                self.value.load(Ordering::SeqCst, guard),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                guard,
+            );
         } else {
             let _ = spot.compare_exchange(
                 shared_self,
