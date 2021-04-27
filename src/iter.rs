@@ -38,7 +38,7 @@ impl<T> Iterator for IntoIter<T> {
                 // * The `Owned` we get follows the tag convention for values,
                 //   so turning it into an enum is safe.
                 unsafe {
-                    let atomic = ptr::read(&self.data[self.next - 1]).assume_init();
+                    let atomic = ptr::read(&self.data[self.next]).assume_init();
                     // Skip over null values. There should be an easier way to
                     // do this, but there isn't. We can use `unprotected`
                     // because we have a mutable reference, so it won't be
