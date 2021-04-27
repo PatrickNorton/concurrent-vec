@@ -1,5 +1,5 @@
 use crate::{FvdVec, LIMIT};
-use crossbeam::epoch::{self, Atomic, Owned, Pointer, Shared};
+use crossbeam::epoch::{self, Atomic, Guard, Owned, Pointer, Shared};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -63,6 +63,19 @@ impl<T> Value<T> {
         }
     }
 
+    /// Takes the `Value` and adds it to the list of things to be garbage-
+    /// collected.
+    ///
+    /// SAFETY: It must not be possible to access the guard through a later
+    /// epoch (same as [`Guard::defer_drop`]. The `Shared` must also follow the
+    /// tag convention. It may, however, be null, in which case nothing will
+    /// happen.
+    pub unsafe fn defer_drop(this: Shared<Value<T>>, guard: &Guard) {
+        if !this.is_null() {
+            guard.defer_unchecked(move || drop(Value::into_enum(this.into_owned())))
+        }
+    }
+
     /// Takes the `Value` and turns it into an enum.
     ///
     /// SAFETY: The `Owned` must follow the tag convention for
@@ -123,7 +136,7 @@ impl<T> Descriptor<T> {
 }
 
 impl<T> PushDescr<T> {
-    /// SAFETY: The †ag convention must be followed and `value` must be
+    /// SAFETY: The tag convention must be followed and `value` must be
     /// inhabited by a `Node`. Furthermore, if `self.complete()` returns
     /// `true`, then this *must* have exclusive access to `value`. If it
     /// returns `false`, then access is relinquished and another thread
@@ -182,23 +195,39 @@ impl<T> PushDescr<T> {
             // that if this isn't the case, and in intermediate value is
             // swapped in between the store of `self.state` and this
             // compare_exchange, a memory leak will occur.
-            let _ = spot.compare_exchange(
-                shared_self,
-                self.value.load(Ordering::SeqCst, guard),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-                guard,
-            );
+            if spot
+                .compare_exchange(
+                    shared_self,
+                    self.value.load(Ordering::SeqCst, guard),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                )
+                .is_ok()
+            {
+                // SAFETY: Once we've removed this from the vector, it can no
+                // longer be accessed by anybody new. It also follows the tag
+                // convention.
+                unsafe { Value::defer_drop(shared_self, guard) }
+            }
         } else {
             // Makes sure this is no longer accessible, so it can be cleaned
             // up, so the given thread can take care of it.
-            let _ = spot.compare_exchange(
-                shared_self,
-                Shared::null(),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-                guard,
-            );
+            if spot
+                .compare_exchange(
+                    shared_self,
+                    Shared::null(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                )
+                .is_ok()
+            {
+                // SAFETY: Once we've removed this from the vector, it can no
+                // longer be accessed by anybody new. It also follows the tag
+                // convention.
+                unsafe { Value::defer_drop(shared_self, guard) }
+            }
         }
         self.state.load(Ordering::SeqCst) == PASSED
     }

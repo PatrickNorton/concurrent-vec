@@ -139,11 +139,11 @@ impl<T> FvdVec<T> {
                     Ordering::SeqCst,
                     guard,
                 ) {
-                    Result::Ok(val) => {
+                    Result::Ok(desc) => {
                         // SAFETY: We know there's a descriptor in this and it
                         // follows the tag convention (b/c we just put it
                         // there).
-                        let result = unsafe { Descriptor::complete_unchecked(val, pos, &self) };
+                        let result = unsafe { Descriptor::complete_unchecked(desc, pos, &self) };
                         if result {
                             self.increment_size();
                             // SAFETY: The guard has fulfilled its purpose, so
@@ -154,7 +154,7 @@ impl<T> FvdVec<T> {
                             // rid of it.
                             // NOTE: We can't use `value` from here on out,
                             // because the descriptor took it.
-                            unsafe { guard.defer_destroy(val) };
+                            unsafe { Value::defer_drop(desc, guard) };
                             return;
                         } else {
                             pos -= 1;
@@ -164,9 +164,10 @@ impl<T> FvdVec<T> {
                             // destroyed. Since we put the guard into the
                             // vector, we are the ones responsible for getting
                             // rid of it.
-                            unsafe { guard.defer_destroy(val) };
+                            unsafe { Value::defer_drop(desc, guard) };
                             // SAFETY: PushDescr is always a Value created from
-                            // `Value::new_data`.
+                            // `Value::new_data`. We can still use `value`,
+                            // because the descriptor didn't take it.
                             ph = unsafe { PushDescr::new_value(value.clone()) };
                         }
                     }
