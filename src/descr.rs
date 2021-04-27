@@ -156,6 +156,9 @@ impl<T> PushDescr<T> {
             // call earlier.
             // This is safe to dereference because if is_descr() succeeds, then
             // the Shared points to a valid descriptor.
+            // NOTE: We don't deal with the descriptor at all because it's the
+            // job of the thread that placed the descriptor to clean up after
+            // it.
             unsafe { Descriptor::complete_unchecked(current, pos - 1, value) };
             current = spot_2.load(Ordering::SeqCst, guard);
         }
@@ -171,13 +174,14 @@ impl<T> PushDescr<T> {
             // NOTE: While there is no `unsafe` here, it should be noted that
             // once this is passed over, we no longer "own" the value, so we
             // may not do anything with it, including drop it.
-            // FIXME: This may cause a memory leak if `spot` is swapped out
-            //  with a different value (e.g. not the value in `self.value`)
-            //  before this compare_exchange. While it would be nice to just
-            //  call `drop` if the swap fails, that won't account for the fact
-            //  that the value could have already been successfully swapped in
-            //  (which would cause a failure). I'm not sure it's possible to
-            //  deal with this properly.
+            // NOTE 2: While I originally thought this could be a memory leak
+            // if `spot` is swapped out  with a different value (e.g. not the
+            // value in `self.value`) before this compare_exchange, I think
+            // this is not the case, since any thread planning to insert a
+            // value and detects a descriptor will call `complete` on it. Note
+            // that if this isn't the case, and in intermediate value is
+            // swapped in between the store of `self.state` and this
+            // compare_exchange, a memory leak will occur.
             let _ = spot.compare_exchange(
                 shared_self,
                 self.value.load(Ordering::SeqCst, guard),
@@ -186,6 +190,8 @@ impl<T> PushDescr<T> {
                 guard,
             );
         } else {
+            // Makes sure this is no longer accessible, so it can be cleaned
+            // up, so the given thread can take care of it.
             let _ = spot.compare_exchange(
                 shared_self,
                 Shared::null(),
