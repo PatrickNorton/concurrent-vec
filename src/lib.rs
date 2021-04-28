@@ -248,7 +248,6 @@ impl<T> FvdVec<T> {
     }
 
     pub(crate) fn get_spot<'a>(&self, index: usize, guard: &'a Guard) -> &'a Atomic<Value<T>> {
-        let guard = &epoch::pin();
         let data = self.data.load(Ordering::SeqCst, guard);
         if data.is_null() {
             todo!("Resize")
