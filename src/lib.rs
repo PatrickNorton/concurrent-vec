@@ -248,7 +248,20 @@ impl<T> FvdVec<T> {
     }
 
     pub(crate) fn get_spot<'a>(&self, index: usize, guard: &'a Guard) -> &'a Atomic<Value<T>> {
-        todo!()
+        let guard = &epoch::pin();
+        let data = self.data.load(Ordering::SeqCst, guard);
+        if data.is_null() {
+            todo!("Resize")
+        } else {
+            // SAFETY: If `self.data` is not null, it is safe to load.
+            match unsafe { data.deref() }.get(index) {
+                // SAFETY: The reference won't outlive the guard, so it can't
+                // get destroyed accidentally. Furthermore, all data in
+                // `self.data` is initialized, so we can deref `as_ptr()`.
+                Option::Some(x) => unsafe { &*x.as_ptr() },
+                Option::None => todo!("Resize"),
+            }
+        }
     }
 
     fn resize<'a>(
