@@ -11,7 +11,7 @@ mod iter;
 
 use crate::descr::{is_descr, Descriptor, Node, PushDescr, Value};
 use crate::iter::IntoIter;
-use crossbeam::epoch::{self, Atomic, Owned};
+use crossbeam::epoch::{self, Atomic, Guard, Owned, Shared};
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
@@ -30,9 +30,7 @@ pub struct FvdVec<T> {
     // SAFETY GUARANTEES:
     // * self.data is either null or points to a valid slice.
     // * * If self.data is null, this vector is empty.
-    // * All values up to self.length are initialized, though maybe with null.
-    // * * We may change this so that array resizing initializes all values
-    //     with Atomic::null(), so that this isn't an issue.
+    // * All values in the arrat are initialized, though maybe with null.
     // * All `Atomic<Value<T>>` that are non-null and non-`NOT_VALUE` follow
     //   the tag convention.
     data: Atomic<Data<T>>,
@@ -62,8 +60,10 @@ impl<T> FvdVec<T> {
 
     /// Creates a `WFVec<T>` with the given capacity.
     pub fn with_capacity(cap: usize) -> FvdVec<T> {
+        let mut data = Owned::<Data<T>>::init(cap);
+        data.fill_with(|| MaybeUninit::new(Atomic::null()));
         FvdVec {
-            data: Atomic::init(cap),
+            data: Atomic::from(data),
             length: AtomicUsize::new(0),
             capacity: AtomicUsize::new(cap),
             phantom: PhantomData,
@@ -109,7 +109,7 @@ impl<T> FvdVec<T> {
             if failures > LIMIT {
                 todo!("announce_op(PushOp(value))")
             }
-            let mut spot = self.get_spot(pos);
+            let mut spot = self.get_spot(pos, guard);
             let expected = spot.load(Ordering::SeqCst, guard);
             if expected.is_null() {
                 if pos == 0 {
@@ -126,7 +126,7 @@ impl<T> FvdVec<T> {
                         }
                         Result::Err(_) => {
                             pos += 1;
-                            spot = self.get_spot(pos);
+                            spot = self.get_spot(pos, guard);
                         }
                     }
                 }
@@ -247,7 +247,16 @@ impl<T> FvdVec<T> {
         todo!()
     }
 
-    pub(crate) fn get_spot(&self, index: usize) -> &Atomic<Value<T>> {
+    pub(crate) fn get_spot<'a>(&self, index: usize, guard: &'a Guard) -> &'a Atomic<Value<T>> {
+        todo!()
+    }
+
+    fn resize<'a>(
+        &self,
+        new_size: usize,
+        self_data: Shared<Data<T>>,
+        guard: &'a Guard,
+    ) -> Result<Shared<'a, Data<T>>, ()> {
         todo!()
     }
 
@@ -516,6 +525,16 @@ mod tests {
         let vec: FvdVec<_> = values.into();
         for (i, j) in vec.into_iter().zip(array::IntoIter::new(values)) {
             assert_eq!(i, j);
+        }
+    }
+
+    #[test]
+    fn push() {
+        let vec = FvdVec::with_capacity(10);
+        vec.push(0);
+        assert_eq!(vec.len(), 1);
+        for i in vec {
+            assert_eq!(i, 0);
         }
     }
 }

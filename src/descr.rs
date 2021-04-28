@@ -151,8 +151,8 @@ impl<T> PushDescr<T> {
     pub fn complete(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
         assert_eq!(self as *const _ as usize, shared_self.into_usize());
         let guard = &epoch::pin();
-        let spot = value.get_spot(pos);
-        let spot_2 = value.get_spot(pos - 1);
+        let spot = value.get_spot(pos, guard);
+        let spot_2 = value.get_spot(pos - 1, guard);
         let mut failures = 0;
         let mut current = spot_2.load(Ordering::SeqCst, guard);
         while self.state.load(Ordering::SeqCst) == UNDECIDED && is_descr(current) {
