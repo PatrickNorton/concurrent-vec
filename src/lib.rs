@@ -61,7 +61,9 @@ impl<T> FvdVec<T> {
     /// Creates a `WFVec<T>` with the given capacity.
     pub fn with_capacity(cap: usize) -> FvdVec<T> {
         let mut data = Owned::<Data<T>>::init(cap);
-        data.fill_with(|| MaybeUninit::new(Atomic::null()));
+        // FIXME: Buffer overflow in crossbeam (array initialized with length
+        //  equal to total allocated bytes, not number of elements)
+        data[..cap].fill_with(|| MaybeUninit::new(Atomic::null()));
         FvdVec {
             data: Atomic::from(data),
             length: AtomicUsize::new(0),
