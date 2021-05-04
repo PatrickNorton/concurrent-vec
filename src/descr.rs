@@ -1,7 +1,8 @@
-use crate::{FvdVec, LIMIT};
+use crate::{Data, FvdVec, LIMIT};
 use crossbeam::epoch::{self, Atomic, Guard, Owned, Pointer, Shared};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 const UNDECIDED: u8 = 0;
 const FAILED: u8 = 1;
@@ -21,9 +22,9 @@ pub enum ValueEnum<T> {
     Push(Descriptor<T>),
 }
 
+// TODO: Make reference count intrusive (remove indirection)
 pub struct Node<T> {
-    pub val: T,
-    ref_count: AtomicUsize,
+    pub val: Arc<T>,
     _align: Align2,
 }
 
@@ -48,6 +49,7 @@ pub struct PopDescr {}
 pub struct PopSubDescr {}
 
 #[repr(align(2))]
+#[derive(Default, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 struct Align2;
 
 impl<T> Value<T> {
@@ -100,13 +102,16 @@ impl<T> Value<T> {
     pub unsafe fn as_descriptor(&self) -> &Descriptor<T> {
         &self.push
     }
+
+    pub unsafe fn as_data(&self) -> &Node<T> {
+        &self.data
+    }
 }
 
 impl<T> Node<T> {
     pub fn new(value: T) -> Node<T> {
         Node {
-            val: value,
-            ref_count: AtomicUsize::new(1),
+            val: Arc::new(value),
             _align: Align2,
         }
     }
@@ -242,6 +247,15 @@ impl PopDescr {
 impl PopSubDescr {
     pub fn complete<T>(&self, pos: usize, value: &FvdVec<T>) -> bool {
         todo!()
+    }
+}
+
+impl<T> Clone for Node<T> {
+    fn clone(&self) -> Self {
+        Node {
+            val: self.val.clone(),
+            _align: self._align.clone(),
+        }
     }
 }
 

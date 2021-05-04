@@ -3,6 +3,7 @@ use crate::Data;
 use crossbeam::epoch::{self, Owned};
 use std::ptr;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 pub struct IntoIter<T> {
     data: Owned<Data<T>>,
@@ -54,7 +55,13 @@ impl<T> Iterator for IntoIter<T> {
                     }
                     self.next += 1;
                     match Value::into_enum(atomic.into_owned()) {
-                        ValueEnum::Data(d) => return Option::Some(d.val),
+                        // TODO: Intrusive reference counting should remove
+                        //  this `unwrap`.
+                        ValueEnum::Data(d) => {
+                            return Option::Some(
+                                Arc::try_unwrap(d.val).unwrap_or_else(|_| panic!()),
+                            );
+                        }
                         // In theory, these shouldn't exist (all descriptor-
                         // based operations should have finished well before
                         // a mutable reference is created), but we choose to

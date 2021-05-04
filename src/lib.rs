@@ -12,11 +12,12 @@ mod iter;
 use crate::descr::{is_descr, Descriptor, Node, PushDescr, Value};
 use crate::iter::IntoIter;
 use crossbeam::epoch::{self, Atomic, Guard, Owned, Shared};
+use std::borrow::Borrow;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
-use std::ops::Deref;
+use std::ops::{Deref, Index};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{array, mem, ptr};
 
@@ -30,7 +31,7 @@ pub struct FvdVec<T> {
     // SAFETY GUARANTEES:
     // * self.data is either null or points to a valid slice.
     // * * If self.data is null, this vector is empty.
-    // * All values in the arrat are initialized, though maybe with null.
+    // * All values in the array are initialized, though maybe with null.
     // * All `Atomic<Value<T>>` that are non-null and non-`NOT_VALUE` follow
     //   the tag convention.
     data: Atomic<Data<T>>,
@@ -40,8 +41,8 @@ pub struct FvdVec<T> {
 }
 
 pub struct Ref<'a, T> {
-    parent: &'a FvdVec<T>,
-    value: &'a Node<T>,
+    _parent: &'a FvdVec<T>,
+    value: Node<T>,
 }
 
 impl<T> FvdVec<T> {
@@ -224,8 +225,22 @@ impl<T> FvdVec<T> {
     /// `self.size()`, see [`Self::fast_push()`][a] for details.
     ///
     /// [a]: Self::fast_push()
-    pub fn get(&self, index: usize) -> Option<&T> {
-        todo!()
+    pub fn get(&self, index: usize) -> Option<Ref<'_, T>> {
+        if index < self.length.load(Ordering::SeqCst) {
+            let guard = &epoch::pin();
+            let spot = self.get_spot(index, guard);
+            let temp = spot.load(Ordering::SeqCst, guard);
+            if is_descr(temp) {
+                todo!("temp = temp.get_value(self, pos)")
+            }
+            if !temp.is_null() {
+                return Option::Some(Ref {
+                    _parent: self,
+                    value: unsafe { temp.deref().as_data().clone() },
+                });
+            }
+        }
+        Option::None
     }
 
     /// Writes the given value to the given index.
@@ -508,6 +523,20 @@ impl<T> Drop for FvdVec<T> {
     }
 }
 
+impl<T> Deref for Ref<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value.val
+    }
+}
+
+impl<T> Borrow<T> for Ref<'_, T> {
+    fn borrow(&self) -> &T {
+        &self.value.val
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::FvdVec;
@@ -550,5 +579,11 @@ mod tests {
         for i in vec {
             assert_eq!(i, 0);
         }
+    }
+
+    #[test]
+    fn get() {
+        let vec = FvdVec::from([0]);
+        assert_eq!(*vec.get(0).unwrap(), 0)
     }
 }
