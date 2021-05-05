@@ -1,5 +1,5 @@
 use crate::{Data, FvdVec, LIMIT};
-use crossbeam::epoch::{self, Atomic, Guard, Owned, Pointer, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Pointer, Shared};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;

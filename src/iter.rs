@@ -1,6 +1,6 @@
 use crate::descr::{Value, ValueEnum};
 use crate::{Data, FvdVec, Ref};
-use crossbeam::epoch::{self, Owned};
+use crossbeam_epoch::{self as epoch, Owned};
 use std::iter::FusedIterator;
 use std::ptr;
 use std::sync::atomic::Ordering;

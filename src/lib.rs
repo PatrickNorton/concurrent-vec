@@ -11,7 +11,7 @@ mod iter;
 
 use crate::descr::{is_descr, Descriptor, Node, PushDescr, Value};
 use crate::iter::{IntoIter, Iter};
-use crossbeam::epoch::{self, Atomic, Guard, Owned, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::borrow::Borrow;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
