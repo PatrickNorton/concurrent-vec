@@ -1,6 +1,7 @@
 use crate::descr::{Value, ValueEnum};
-use crate::Data;
+use crate::{Data, FvdVec, Ref};
 use crossbeam::epoch::{self, Owned};
+use std::iter::FusedIterator;
 use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -9,6 +10,11 @@ pub struct IntoIter<T> {
     data: Owned<Data<T>>,
     next: usize,
     end: usize,
+}
+
+pub struct Iter<'a, T> {
+    data: &'a FvdVec<T>,
+    next: usize,
 }
 
 impl<T> IntoIter<T> {
@@ -20,6 +26,12 @@ impl<T> IntoIter<T> {
     /// * Any initialized values in slots `end..` will not be dropped.
     pub unsafe fn from_parts(data: Owned<Data<T>>, end: usize) -> IntoIter<T> {
         IntoIter { data, next: 0, end }
+    }
+}
+
+impl<'a, T> Iter<'a, T> {
+    pub fn new(data: &'a FvdVec<T>) -> Iter<'a, T> {
+        Iter { data, next: 0 }
     }
 }
 
@@ -48,7 +60,7 @@ impl<T> Iterator for IntoIter<T> {
                     // operations should be finished, but I'm not 100% sure,
                     // and this way there's no UB.
                     if atomic
-                        .load(Ordering::Relaxed, &epoch::unprotected())
+                        .load(Ordering::Relaxed, epoch::unprotected())
                         .is_null()
                     {
                         continue;
@@ -73,6 +85,30 @@ impl<T> Iterator for IntoIter<T> {
                 }
             }
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.end - self.next;
+        (remaining, Option::Some(remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for IntoIter<T> {}
+
+impl<T> FusedIterator for IntoIter<T> {}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = Ref<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Super simple implementation that works. Note that because of the
+        // fact that the underlying data can be concurrently modified, it is
+        // not a `FusedIterator`. A more complicated implementation could make
+        // this Fused, but would need to take heed of the fact that `fast_push`
+        // and `fast_pop` can create intermediary empty values.
+        let value = self.data.get(self.next);
+        self.next += 1;
+        value
     }
 }
 

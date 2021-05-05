@@ -10,14 +10,14 @@ mod descr;
 mod iter;
 
 use crate::descr::{is_descr, Descriptor, Node, PushDescr, Value};
-use crate::iter::IntoIter;
+use crate::iter::{IntoIter, Iter};
 use crossbeam::epoch::{self, Atomic, Guard, Owned, Shared};
 use std::borrow::Borrow;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
-use std::ops::{Deref, Index};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{array, mem, ptr};
 
@@ -264,6 +264,10 @@ impl<T> FvdVec<T> {
         todo!()
     }
 
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter::new(self)
+    }
+
     pub(crate) fn get_spot<'a>(&self, index: usize, guard: &'a Guard) -> &'a Atomic<Value<T>> {
         let data = self.data.load(Ordering::SeqCst, guard);
         if data.is_null() {
@@ -345,6 +349,15 @@ impl<T> IntoIterator for FvdVec<T> {
             mem::forget(self);
             IntoIter::from_parts(data.into_owned(), end)
         }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a FvdVec<T> {
+    type Item = Ref<'a, T>;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
