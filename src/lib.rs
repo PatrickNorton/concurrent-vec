@@ -93,7 +93,10 @@ impl<T> FvdVec<T> {
 
     /// Reserves space for `additional` values to be inserted in `self`.
     pub fn reserve(&self, additional: usize) {
-        todo!()
+        // I'm not 100% sure we need the pin here, but let's keep it just in
+        // case.
+        let guard = &epoch::pin();
+        self.get_spot(self.length.load(Ordering::SeqCst) + additional, &guard);
     }
 
     /// Appends an element to the end of the vector.
