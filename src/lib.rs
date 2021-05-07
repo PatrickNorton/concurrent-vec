@@ -9,7 +9,7 @@
 mod descr;
 mod iter;
 
-use crate::descr::{is_descr, Descriptor, Node, PushDescr, Value};
+use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value};
 use crate::iter::{IntoIter, Iter};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::borrow::Borrow;
@@ -196,8 +196,59 @@ impl<T> FvdVec<T> {
     /// Removes an element from the end of the vector.
     ///
     /// This corresponds to the `cas_popBack` method from the paper.
-    pub fn pop(&self) -> Option<T> {
-        todo!()
+    pub fn pop(&self) -> Option<Ref<'_, T>> {
+        let mut failures = 0;
+        let mut ph = PopDescr::new();
+        let mut pos = self.length.load(Ordering::SeqCst);
+        let guard = &epoch::pin();
+        loop {
+            failures += 1;
+            if failures > LIMIT {
+                todo!("return announce_op(PopOp(value))")
+            } else if pos == 0 {
+                return Option::None;
+            }
+            let spot = self.get_spot(pos, guard);
+            let expected = spot.load(Ordering::SeqCst, guard);
+            if expected.is_null() {
+                let value_desc = Value::new_descriptor(Descriptor::Pop(ph));
+                let value = Owned::new(value_desc).with_tag(1);
+                match spot.compare_exchange(
+                    expected,
+                    value,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                ) {
+                    Result::Ok(desc) => {
+                        // SAFETY: We know that there's a descriptor here and
+                        // that it follows the tag convention, as we just put
+                        // it there.
+                        let res = unsafe { Descriptor::complete_unchecked(desc, pos, self) };
+                        if res {
+                            self.decrement_size();
+                            // SAFETY: The descriptor's still there (if this
+                            // causes UB, then the call to complete_unchecked
+                            // must have caused UB too).
+                            let value = unsafe { desc.deref().as_descriptor() };
+                            let value = value.as_pop().unwrap();
+                            // SAFETY: `value` was just completed, so calling
+                            // `get_value` is safe.
+                            return Option::Some(Ref::new(
+                                self,
+                                unsafe { value.get_value(guard) }.clone(),
+                            ));
+                        } else {
+                            ph = PopDescr::new();
+                            pos -= 1;
+                        }
+                    }
+                    Result::Err(_) => {
+                        ph = PopDescr::new();
+                    }
+                }
+            }
+        }
     }
 
     /// Appends an element to the end of the vector.
@@ -237,10 +288,9 @@ impl<T> FvdVec<T> {
                 todo!("temp = temp.get_value(self, pos)")
             }
             if !temp.is_null() {
-                return Option::Some(Ref {
-                    _parent: self,
-                    value: unsafe { temp.deref().as_data().clone() },
-                });
+                // SAFETY: We know that `temp` is not null, and not a
+                // descriptor, so it must be a value.
+                return Option::Some(Ref::new(self, unsafe { temp.deref().as_data().clone() }));
             }
         }
         Option::None
@@ -277,12 +327,21 @@ impl<T> FvdVec<T> {
             todo!("Resize")
         } else {
             // SAFETY: If `self.data` is not null, it is safe to load.
+            // FIXME: Because crossbeam still gets the array length wrong,
+            //  this can cause UB if called on a position beyond the array
+            //  length. This should be fixed to use `self.capacity` in a
+            //  thread-safe manner.
+            // FIXME NOTE: The `self.capacity.load()` patch will work in
+            //  single-threaded environments, but with multiple threads, it may
+            //  not, which will still cause UB.A
             match unsafe { data.deref() }.get(index) {
                 // SAFETY: The reference won't outlive the guard, so it can't
                 // get destroyed accidentally. Furthermore, all data in
                 // `self.data` is initialized, so we can deref `as_ptr()`.
-                Option::Some(x) => unsafe { &*x.as_ptr() },
-                Option::None => todo!("Resize"),
+                Option::Some(x) if self.capacity.load(Ordering::SeqCst) > index => unsafe {
+                    &*x.as_ptr()
+                },
+                _ => todo!("Resize"),
             }
         }
     }
@@ -298,6 +357,19 @@ impl<T> FvdVec<T> {
 
     fn increment_size(&self) {
         self.length.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn decrement_size(&self) {
+        self.length.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl<'a, T> Ref<'a, T> {
+    fn new(parent: &'a FvdVec<T>, value: Node<T>) -> Ref<'a, T> {
+        Ref {
+            _parent: parent,
+            value,
+        }
     }
 }
 
@@ -595,6 +667,13 @@ mod tests {
         for i in vec {
             assert_eq!(i, 0);
         }
+    }
+
+    #[test]
+    fn pop() {
+        let vec = FvdVec::with_capacity(10);
+        vec.push(0);
+        assert_eq!(*vec.pop().unwrap(), 0);
     }
 
     #[test]

@@ -12,6 +12,11 @@ const PASSED: u8 = 2;
 ///
 /// Note that the variant in use should be determined by the tag on the
 /// pointer to this, for safety.
+///
+/// SAFETY: Overwriting this with a value of a different type in-place
+/// (including descriptors of different types) is unsafe, even if done
+/// atomically.
+#[repr(C)] // Ensures that all values are at the beginning of the struct
 pub union Value<T> {
     data: ManuallyDrop<Node<T>>,
     push: ManuallyDrop<Descriptor<T>>,
@@ -30,8 +35,8 @@ pub struct Node<T> {
 
 pub enum Descriptor<T> {
     Push(PushDescr<T>),
-    Pop(PopDescr),
-    PopSub(PopSubDescr),
+    Pop(PopDescr<T>),
+    PopSub(PopSubDescr<T>),
 }
 
 pub struct PushDescr<T> {
@@ -44,9 +49,21 @@ pub struct PushDescr<T> {
     value: Atomic<Value<T>>,
 }
 
-pub struct PopDescr {}
+pub struct PopDescr<T> {
+    // SAFETY: `child` must follow the tag convention and contain a valid
+    // PopSubDescr.
+    child: Atomic<Value<T>>,
+}
 
-pub struct PopSubDescr {}
+pub struct PopSubDescr<T> {
+    // SAFETY: `parent` must follow the tag convention and contain a valid
+    // PopDescr.
+    parent: Atomic<Value<T>>,
+    // SAFETY: `value` must follow the tag convention and contain a valid
+    // Value.
+    value: Atomic<Value<T>>,
+    _align: Align2,
+}
 
 #[repr(align(2))]
 #[derive(Default, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -131,11 +148,31 @@ impl<T> Descriptor<T> {
         this.deref().push.complete_inner(pos, value, this)
     }
 
+    pub fn as_pop(&self) -> Option<&PopDescr<T>> {
+        match self {
+            Descriptor::Push(_) => Option::None,
+            Descriptor::Pop(x) => Option::Some(x),
+            Descriptor::PopSub(_) => Option::None,
+        }
+    }
+
+    pub fn as_pop_sub(&self) -> Option<&PopSubDescr<T>> {
+        match self {
+            Descriptor::Push(_) => Option::None,
+            Descriptor::Pop(_) => Option::None,
+            Descriptor::PopSub(x) => Option::Some(x),
+        }
+    }
+
     fn complete_inner(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
+        assert_eq!(
+            self as *const _ as usize,
+            shared_self.with_tag(0).into_usize()
+        );
         match self {
             Descriptor::Push(push) => push.complete(pos, value, shared_self),
-            Descriptor::Pop(pop) => pop.complete(pos, value),
-            Descriptor::PopSub(pop_sub) => pop_sub.complete(pos, value),
+            Descriptor::Pop(pop) => pop.complete(pos, value, shared_self),
+            Descriptor::PopSub(pop_sub) => pop_sub.complete(pos, value, shared_self),
         }
     }
 }
@@ -154,7 +191,6 @@ impl<T> PushDescr<T> {
     }
 
     pub fn complete(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
-        assert_eq!(self as *const _ as usize, shared_self.into_usize());
         let guard = &epoch::pin();
         let spot = value.get_spot(pos, guard);
         let spot_2 = value.get_spot(pos - 1, guard);
@@ -238,15 +274,191 @@ impl<T> PushDescr<T> {
     }
 }
 
-impl PopDescr {
-    pub fn complete<T>(&self, pos: usize, value: &FvdVec<T>) -> bool {
-        todo!()
+impl<T> PopDescr<T> {
+    pub fn new() -> PopDescr<T> {
+        PopDescr {
+            child: Atomic::null(),
+        }
+    }
+
+    /// Gets the value contained within self.
+    ///
+    /// SAFETY: `self` must have been completed successfully, or `self.value`
+    /// will be null.
+    pub unsafe fn get_value<'a>(&self, guard: &'a Guard) -> &'a Node<T> {
+        // SAFETY:
+        // * `self.child` is either null, or points to a valid `PopSubDescr`.
+        // * `self` was completed successfully, so `self.child` is not null.
+        // * `PopSubDescr.value` always points to a valid `Data`, so
+        //   dereferencing it is safe.
+        // * Even if the guard outlives `self`, it won't be GCed until after
+        //   the guard is freed, so there won't be a use-after-free error.
+        self.child
+            .load(Ordering::SeqCst, guard)
+            .deref()
+            .as_descriptor()
+            .as_pop_sub()
+            .unwrap()
+            .value
+            .load(Ordering::SeqCst, guard)
+            .deref()
+            .as_data()
+    }
+
+    pub fn complete(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
+        const SUCCESS_TAG: usize = 0;
+        const FAILED_TAG: usize = 1;
+        let mut failures = 0;
+        let guard = &epoch::pin();
+        let spot = value.get_spot(pos - 1, guard);
+        while self.child.load(Ordering::SeqCst, guard).is_null() {
+            failures += 1;
+            if failures > LIMIT {
+                let failed = Shared::null().with_tag(FAILED_TAG);
+                let _ = self.child.compare_exchange(
+                    Shared::null(),
+                    failed,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                );
+            } else {
+                let expected = spot.load(Ordering::SeqCst, guard);
+                if expected.is_null() {
+                    let failed = Shared::null().with_tag(FAILED_TAG);
+                    let _ = self.child.compare_exchange(
+                        Shared::null(),
+                        failed,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        guard,
+                    );
+                } else if is_descr(expected) {
+                    // SAFETY: `expected` is a known descriptor, so
+                    // dereferencing it is safe.
+                    unsafe { Descriptor::complete_unchecked(expected, pos - 1, value) };
+                } else {
+                    // SAFETY: `parent` points to a valid PopDescr (shared_self
+                    // is a valid PopDescr), and `value` points to a valid
+                    // Value (expected is a known Value)
+                    let psh = unsafe {
+                        PopSubDescr::new(Atomic::from(shared_self), Atomic::from(expected))
+                    };
+                    let psh = Value::new_descriptor(Descriptor::PopSub(psh));
+                    let psh = Owned::new(psh).into_shared(guard);
+                    if let Result::Ok(psh) = spot.compare_exchange(
+                        expected,
+                        psh,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        guard,
+                    ) {
+                        let _ = self.child.compare_exchange(
+                            Shared::null(),
+                            psh,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                            guard,
+                        );
+                        let spot_2 = value.get_spot(pos, guard);
+                        let _ = spot_2.compare_exchange(
+                            shared_self,
+                            Shared::null(),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                            guard,
+                        );
+                        if self.child.load(Ordering::SeqCst, guard) == psh {
+                            let _ = spot.compare_exchange(
+                                psh,
+                                Shared::null(),
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                                guard,
+                            );
+                        } else {
+                            let _ = spot.compare_exchange(
+                                shared_self,
+                                expected,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                                guard,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.child.load(Ordering::SeqCst, guard).tag() == SUCCESS_TAG
     }
 }
 
-impl PopSubDescr {
-    pub fn complete<T>(&self, pos: usize, value: &FvdVec<T>) -> bool {
-        todo!()
+impl<T> PopSubDescr<T> {
+    /// Creates a new `PopSubDescr`.
+    ///
+    /// SAFETY: `parent` must point to a valid `PopDescr<T>`, and `expected`
+    /// must point to valid data.
+    pub unsafe fn new(parent: Atomic<Value<T>>, value: Atomic<Value<T>>) -> PopSubDescr<T> {
+        PopSubDescr {
+            parent,
+            value,
+            _align: Default::default(),
+        }
+    }
+
+    pub fn complete(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
+        assert_eq!(self as *const _ as usize, shared_self.into_usize());
+        let guard = &epoch::pin();
+        let spot = value.get_spot(pos, guard);
+        // SAFETY: `self.parent` points to a valid PopDescr, so loading it is
+        // safe.
+        let ph = unsafe {
+            &self
+                .parent
+                .load(Ordering::SeqCst, guard)
+                .deref()
+                .as_descriptor()
+                .as_pop()
+                .unwrap()
+                .child
+        };
+        match ph.compare_exchange(
+            Shared::null(),
+            shared_self,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            guard,
+        ) {
+            Result::Ok(_) => {
+                let _ = spot.compare_exchange(
+                    shared_self,
+                    Shared::null(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                );
+                true
+            }
+            Result::Err(_) => {
+                match spot.compare_exchange(
+                    shared_self,
+                    self.value.load(Ordering::SeqCst, guard),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                ) {
+                    Result::Ok(_) => {}
+                    // SAFETY: If this occurs, the value was overwritten before
+                    // it could be popped, and it is thus lost. As such, we are
+                    // not able to do anything with it, and must drop it in
+                    // order to ensure memory is not leaked. Furthermore, it
+                    // does follow the tag convention, as we just got it from
+                    // the vector.
+                    Result::Err(x) => unsafe { Value::defer_drop(x.new, guard) },
+                }
+                false
+            }
+        }
     }
 }
 
@@ -256,6 +468,12 @@ impl<T> Clone for Node<T> {
             val: self.val.clone(),
             _align: self._align.clone(),
         }
+    }
+}
+
+impl<T> Default for PopDescr<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
