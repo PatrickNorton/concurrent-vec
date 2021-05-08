@@ -333,7 +333,7 @@ impl<T> FvdVec<T> {
             //  thread-safe manner.
             // FIXME NOTE: The `self.capacity.load()` patch will work in
             //  single-threaded environments, but with multiple threads, it may
-            //  not, which will still cause UB.A
+            //  not, which will still cause UB.
             match unsafe { data.deref() }.get(index) {
                 // SAFETY: The reference won't outlive the guard, so it can't
                 // get destroyed accidentally. Furthermore, all data in
@@ -373,9 +373,19 @@ impl<'a, T> Ref<'a, T> {
     }
 }
 
+struct DebugHelper<'a, T>(Ref<'a, T>);
+
+impl<T: Debug> Debug for DebugHelper<'_, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        <T as Debug>::fmt(&*self.0, f)
+    }
+}
+
 impl<T: Debug> Debug for FvdVec<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        todo!()
+        f.debug_list()
+            .entries(self.iter().map(DebugHelper))
+            .finish()
     }
 }
 
@@ -393,6 +403,8 @@ impl<T: PartialEq> PartialEq for FvdVec<T> {
             // value with itself would return false b/c of the value being
             // changed out from under us while the comparison is happening.
             true
+        } else if self.len() != other.len() {
+            false
         } else {
             todo!()
         }
