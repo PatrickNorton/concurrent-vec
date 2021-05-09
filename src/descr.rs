@@ -1,6 +1,7 @@
 use crate::{Data, FvdVec, LIMIT};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Pointer, Shared};
 use std::mem::ManuallyDrop;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ pub enum ValueEnum<T> {
 }
 
 // TODO: Make reference count intrusive (remove indirection)
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
 pub struct Node<T> {
     pub val: Arc<T>,
     _align: Align2,
@@ -471,6 +473,14 @@ impl<T> Clone for Node<T> {
     }
 }
 
+impl<T> Deref for Node<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.val
+    }
+}
+
 impl<T> Default for PopDescr<T> {
     fn default() -> Self {
         Self::new()
@@ -491,6 +501,10 @@ pub unsafe fn decompose<T>(value: Shared<Value<T>>) -> Result<&Node<T>, &Descrip
     }
 }
 
+/// Checks if the given value is a descriptor.
+///
+/// If this returns `true`, the given value is safe to use as a descriptor, so
+/// long as it follows the tag convention.
 #[inline]
 pub fn is_descr<T>(current: Shared<Value<T>>) -> bool {
     current.tag() == 1 && !current.is_null()

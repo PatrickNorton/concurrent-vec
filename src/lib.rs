@@ -19,6 +19,7 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::{array, mem, ptr};
 
 type Data<T> = [MaybeUninit<Atomic<Value<T>>>];
@@ -296,16 +297,6 @@ impl<T> FvdVec<T> {
         Option::None
     }
 
-    /// Writes the given value to the given index.
-    ///
-    /// This will return false if `index` is out-of-bounds, or if another
-    /// thread is in the middle of updating it (I think)
-    ///
-    /// TODO: Get better explanation
-    pub fn c_write(&self, index: usize, value: T) -> Result<(), T> {
-        todo!()
-    }
-
     /// Inserts the value at the given index.
     pub fn insert(&self, index: usize, value: T) {
         todo!()
@@ -361,6 +352,77 @@ impl<T> FvdVec<T> {
 
     fn decrement_size(&self) {
         self.length.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl<T: PartialEq> FvdVec<T> {
+    /// Writes the given value to the given index, if not equal to the current
+    /// value.
+    ///
+    /// If the value was equal, a [`Ref`] to the newly-placed value is
+    /// returned. If not, the new value is returned intact.
+    pub fn c_write(&self, index: usize, old: &T, new: T) -> Result<Ref<'_, T>, T> {
+        if index < self.capacity.load(Ordering::SeqCst) {
+            // SAFETY NOTE: `new` should always point to a valid `Data`. Until it
+            // is placed into the vector, we own it, so we can safely read from it.
+            let mut new = Owned::new(Value::new_data(new));
+            let guard = &epoch::pin();
+            let spot = self.get_spot(index, guard);
+            for _failures in 0..LIMIT {
+                let value = spot.load(Ordering::SeqCst, guard);
+                if value.is_null() {
+                    // SAFETY: `new` always points to a valid `Data`. We own
+                    // it, so we can unwrap it from the `Arc`. (When we switch
+                    // to intrusive reference-counting, we can do this without
+                    // the check)
+                    return Result::Err(
+                        Arc::try_unwrap(unsafe { new.into_box().into_data().val })
+                            .unwrap_or_else(|_| unreachable!()),
+                    );
+                } else if is_descr(value) {
+                    // SAFETY: This is a valid descriptor, as just checked, and
+                    // it follows the tag convention, so `is_descr` is a valid
+                    // check.
+                    unsafe { Descriptor::complete_unchecked(value, index, self) };
+                } else {
+                    // SAFETY (x2): We know `value` is safe to dereference
+                    // because it came from `self` and is neither null nor a
+                    // descriptor; thus, it must point to valid data. `new` is
+                    // safe to dereference because we know it always points to
+                    // a valid `Data`.
+                    let val = unsafe { value.deref().as_data() };
+                    if old == &**val {
+                        match spot.compare_exchange(
+                            value,
+                            new,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                            guard,
+                        ) {
+                            Result::Ok(val) => {
+                                // SAFETY: `val` comes from `new`, which still
+                                // points to a valid `Data`.
+                                let value = unsafe { val.deref().as_data().clone() };
+                                return Result::Ok(Ref::new(self, value));
+                            }
+                            Result::Err(err) => new = err.new,
+                        }
+                    } else {
+                        // SAFETY: `new` always points to a valid `Data`. We
+                        // own it, so we can unwrap it from the `Arc`. (When we
+                        // switch to intrusive reference-counting, we can do
+                        // this without the check)
+                        return Result::Err(
+                            Arc::try_unwrap(unsafe { new.into_box().into_data().val })
+                                .unwrap_or_else(|_| unreachable!()),
+                        );
+                    }
+                }
+            }
+            todo!("return announce_op(CWriteOp(index, old, new))")
+        } else {
+            Result::Err(new)
+        }
     }
 }
 
@@ -692,5 +754,12 @@ mod tests {
     fn get() {
         let vec = FvdVec::from([0]);
         assert_eq!(*vec.get(0).unwrap(), 0)
+    }
+
+    #[test]
+    fn c_write() {
+        let vec = FvdVec::from([0]);
+        assert_eq!(vec.c_write(0, &0, 1).map(|x| *x), Result::Ok(1));
+        assert_eq!(vec.c_write(0, &0, 1).map(|x| *x), Result::Err(1));
     }
 }
