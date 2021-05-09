@@ -209,6 +209,7 @@ impl<T> FvdVec<T> {
             } else if pos == 0 {
                 return Option::None;
             }
+            // TODO: Use try_get_spot somehow to prevent over-allocating
             let spot = self.get_spot(pos, guard);
             let expected = spot.load(Ordering::SeqCst, guard);
             if expected.is_null() {
@@ -312,6 +313,41 @@ impl<T> FvdVec<T> {
         Iter::new(self)
     }
 
+    /// Returns a reference to the `Atomic` at the given location, or `None` if
+    /// the index is greater than the capacity.
+    ///
+    /// This differs from `get_spot` because it will not reallocate to extend
+    /// in the case of an out-of-bounds index. If it is between `self.len()`
+    /// and `self.capacity()`, the `Atomic` will be null, otherwise it will be
+    /// a valid pointer that follows the tag convention.
+    pub(crate) fn try_get_spot<'a>(
+        &self,
+        index: usize,
+        guard: &'a Guard,
+    ) -> Option<&'a Atomic<Value<T>>> {
+        let data = self.data.load(Ordering::SeqCst, guard);
+        if data.is_null() {
+            Option::None
+        } else {
+            // SAFETY: If `self.data` is not null, it is safe to load.
+            // FIXME: See `self.get_spot`.
+            match unsafe { data.deref() }.get(index) {
+                // SAFETY: The reference won't outlive the guard, so it can't
+                // get destroyed accidentally. Furthermore, all data in
+                // `self.data` is initialized, so we can deref `as_ptr()`.
+                Option::Some(x) if self.capacity.load(Ordering::SeqCst) > index => unsafe {
+                    Option::Some(&*x.as_ptr())
+                },
+                _ => Option::None,
+            }
+        }
+    }
+
+    /// Returns a reference to the `Atomic` at the given location.
+    ///
+    /// This will reallocate to ensure that the given index is in bounds if
+    /// necessary. If the index is greater than `self.len()`, it will be null,
+    /// otherwise it will be a valid pointer that follows the tag convention.
     pub(crate) fn get_spot<'a>(&self, index: usize, guard: &'a Guard) -> &'a Atomic<Value<T>> {
         let data = self.data.load(Ordering::SeqCst, guard);
         if data.is_null() {
@@ -367,9 +403,12 @@ impl<T: PartialEq> FvdVec<T> {
             // is placed into the vector, we own it, so we can safely read from it.
             let mut new = Owned::new(Value::new_data(new));
             let guard = &epoch::pin();
-            let spot = self.get_spot(index, guard);
+            let spot = self.try_get_spot(index, guard);
             for _failures in 0..LIMIT {
-                let value = spot.load(Ordering::SeqCst, guard);
+                let value = match &spot {
+                    Option::Some(spot) => spot.load(Ordering::SeqCst, guard),
+                    Option::None => Shared::null(),
+                };
                 if value.is_null() {
                     // SAFETY: `new` always points to a valid `Data`. We own
                     // it, so we can unwrap it from the `Arc`. (When we switch
@@ -385,14 +424,14 @@ impl<T: PartialEq> FvdVec<T> {
                     // check.
                     unsafe { Descriptor::complete_unchecked(value, index, self) };
                 } else {
-                    // SAFETY (x2): We know `value` is safe to dereference
+                    // SAFETY: We know `value` is safe to dereference
                     // because it came from `self` and is neither null nor a
-                    // descriptor; thus, it must point to valid data. `new` is
-                    // safe to dereference because we know it always points to
-                    // a valid `Data`.
+                    // descriptor; thus, it must point to valid data.
                     let val = unsafe { value.deref().as_data() };
                     if old == &**val {
-                        match spot.compare_exchange(
+                        // If spot was not null, the first branch would have
+                        // been taken.
+                        match spot.unwrap().compare_exchange(
                             value,
                             new,
                             Ordering::SeqCst,
