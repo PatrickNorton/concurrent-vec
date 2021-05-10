@@ -26,6 +26,15 @@ type Data<T> = [MaybeUninit<Atomic<Value<T>>>];
 
 const LIMIT: usize = 32;
 
+#[macro_export]
+macro_rules! fvd_vec {
+    () => {FvdVec::new()};
+
+    ($($x:expr),+ $(,)?) => (
+        FvdVec::from([$($x),+])
+    );
+}
+
 /// A wait-free vector based on the paper by Feldman et al. It offers
 /// random-access reads and writes, as well as push/pop operations.
 pub struct FvdVec<T> {
