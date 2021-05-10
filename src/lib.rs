@@ -298,6 +298,65 @@ impl<T> FvdVec<T> {
         Option::None
     }
 
+    /// Writes the value to the given index, returning the old value.
+    ///
+    /// Note that unlike [`Self::c_write`], this returns the _old_ value on
+    /// success, while `c_write` returns the _new_ value. This is because with
+    /// `c_write`, we know the old value, because it is equal to the value
+    /// passed in to `old`.
+    pub fn write(&self, index: usize, value: T) -> Result<Ref<'_, T>, T> {
+        if index < self.capacity.load(Ordering::SeqCst) {
+            // SAFETY NOTE: `new` should always point to a valid `Data`. Until it
+            // is placed into the vector, we own it, so we can safely read from it.
+            let mut new = Owned::new(Value::new_data(value));
+            let guard = &epoch::pin();
+            let spot = self.try_get_spot(index, guard);
+            for _failures in 0..LIMIT {
+                let value = match &spot {
+                    Option::Some(spot) => spot.load(Ordering::SeqCst, guard),
+                    Option::None => Shared::null(),
+                };
+                if value.is_null() {
+                    // SAFETY: `new` always points to a valid `Data`. We own
+                    // it, so we can unwrap it from the `Arc`. (When we switch
+                    // to intrusive reference-counting, we can do this without
+                    // the check)
+                    return Result::Err(
+                        Arc::try_unwrap(unsafe { new.into_box().into_data().val })
+                            .unwrap_or_else(|_| unreachable!()),
+                    );
+                } else if is_descr(value) {
+                    // SAFETY: This is a valid descriptor, as just checked, and
+                    // it follows the tag convention, so `is_descr` is a valid
+                    // check.
+                    unsafe { Descriptor::complete_unchecked(value, index, self) };
+                } else {
+                    // If spot was not null, the first branch would have been
+                    // taken.
+                    match spot.unwrap().compare_exchange(
+                        value,
+                        new,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        guard,
+                    ) {
+                        Result::Ok(_) => {
+                            // SAFETY: `value` was taken from the vector and is
+                            // neither null nor a descriptor, so therefore it
+                            // must be a valid `Data`.
+                            let value = unsafe { value.deref().as_data().clone() };
+                            return Result::Ok(Ref::new(self, value));
+                        }
+                        Result::Err(err) => new = err.new,
+                    }
+                }
+            }
+            todo!("return announce_op(WriteOp(index, new))")
+        } else {
+            Result::Err(value)
+        }
+    }
+
     /// Inserts the value at the given index.
     pub fn insert(&self, index: usize, value: T) {
         todo!()
@@ -793,6 +852,13 @@ mod tests {
     fn get() {
         let vec = FvdVec::from([0]);
         assert_eq!(*vec.get(0).unwrap(), 0)
+    }
+
+    #[test]
+    fn write() {
+        let vec = FvdVec::from([0]);
+        vec.write(0, 1).unwrap();
+        assert_eq!(*vec.get(0).unwrap(), 1);
     }
 
     #[test]
