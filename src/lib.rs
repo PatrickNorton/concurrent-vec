@@ -395,26 +395,41 @@ impl<T> FvdVec<T> {
     /// necessary. If the index is greater than `self.len()`, it will be null,
     /// otherwise it will be a valid pointer that follows the tag convention.
     pub(crate) fn get_spot<'a>(&self, index: usize, guard: &'a Guard) -> &'a Atomic<Value<T>> {
-        let data = self.data.load(Ordering::SeqCst, guard);
-        if data.is_null() {
-            todo!("Resize")
-        } else {
-            // SAFETY: If `self.data` is not null, it is safe to load.
-            // FIXME: Because crossbeam still gets the array length wrong,
-            //  this can cause UB if called on a position beyond the array
-            //  length. This should be fixed to use `self.capacity` in a
-            //  thread-safe manner.
-            // FIXME NOTE: The `self.capacity.load()` patch will work in
-            //  single-threaded environments, but with multiple threads, it may
-            //  not, which will still cause UB.
-            match unsafe { data.deref() }.get(index) {
-                // SAFETY: The reference won't outlive the guard, so it can't
-                // get destroyed accidentally. Furthermore, all data in
-                // `self.data` is initialized, so we can deref `as_ptr()`.
-                Option::Some(x) if self.capacity.load(Ordering::SeqCst) > index => unsafe {
-                    &*x.as_ptr()
-                },
-                _ => todo!("Resize"),
+        loop {
+            let data = self.data.load(Ordering::SeqCst, guard);
+            if data.is_null() {
+                match self.resize(4, data, guard) {
+                    // SAFETY: We know that the data is initialized, and we can
+                    // thus send a reference to it.
+                    Result::Ok(x) => return unsafe { &*x.deref()[index].as_ptr() },
+                    Result::Err(_) => {}
+                }
+            } else {
+                // SAFETY: If `self.data` is not null, it is safe to load.
+                // FIXME: Because crossbeam still gets the array length wrong,
+                //  this can cause UB if called on a position beyond the array
+                //  length. This should be fixed to use `self.capacity` in a
+                //  thread-safe manner.
+                // FIXME NOTE: The `self.capacity.load()` patch will work in
+                //  single-threaded environments, but with multiple threads, it may
+                //  not, which will still cause UB.
+                let slice = unsafe { data.deref() };
+                match slice.get(index) {
+                    // SAFETY: The reference won't outlive the guard, so it can't
+                    // get destroyed accidentally. Furthermore, all data in
+                    // `self.data` is initialized, so we can deref `as_ptr()`.
+                    Option::Some(x) if self.capacity.load(Ordering::SeqCst) > index => unsafe {
+                        return &*x.as_ptr();
+                    },
+                    _ => {
+                        match self.resize(slice.len().next_power_of_two(), data, guard) {
+                            // SAFETY: We know that the data is initialized,
+                            // and we can thus send a reference to it.
+                            Result::Ok(x) => return unsafe { &*x.deref()[index].as_ptr() },
+                            Result::Err(_) => {}
+                        }
+                    }
+                }
             }
         }
     }
@@ -425,7 +440,27 @@ impl<T> FvdVec<T> {
         self_data: Shared<Data<T>>,
         guard: &'a Guard,
     ) -> Result<Shared<'a, Data<T>>, ()> {
-        todo!()
+        if self_data.is_null() {
+            let mut new_data = Owned::<Data<T>>::init(new_size);
+            // FIXME: Size bug
+            new_data[..new_size].fill_with(|| MaybeUninit::new(Atomic::null()));
+            self.capacity
+                .compare_exchange(0, new_size, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| ())?;
+            match self.data.compare_exchange(
+                self_data,
+                new_data,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                guard,
+            ) {
+                Result::Ok(x) => Result::Ok(x),
+                // FIXME: Reset capacity
+                Result::Err(_) => Result::Err(()),
+            }
+        } else {
+            todo!()
+        }
     }
 
     fn increment_size(&self) {
@@ -853,5 +888,12 @@ mod tests {
         let vec = FvdVec::from([0]);
         assert_eq!(vec.c_write(0, &0, 1).map(|x| *x), Result::Ok(1));
         assert_eq!(vec.c_write(0, &0, 1).map(|x| *x), Result::Err(1));
+    }
+
+    #[test]
+    fn empty_resize() {
+        let vec = FvdVec::new();
+        vec.push(0);
+        assert_eq!(*vec.get(0).unwrap(), 0);
     }
 }
