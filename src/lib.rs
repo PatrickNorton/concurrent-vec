@@ -262,28 +262,6 @@ impl<T> FvdVec<T> {
         }
     }
 
-    /// Appends an element to the end of the vector.
-    ///
-    /// This corresponds to the `faa_pushBack` method from the paper.
-    ///
-    /// # Interaction with indexing
-    ///
-    /// Use of this method in conjunction with indexing can result in
-    /// unexpected behavior. If this method has begun, but not fully completed,
-    /// the index it references is still considered out-of-bounds until the
-    /// value is written to it. As such, it is possible for an index to a
-    /// value less than `self.len()` to fail.
-    pub fn fast_push(&self, value: T) {
-        todo!()
-    }
-
-    /// Removes an element from the end of the vector.
-    ///
-    /// This corresponds to the `faa_popBack` method from the paper.
-    pub fn fast_pop(&self) -> Option<T> {
-        todo!()
-    }
-
     /// Gets the element at the specified position, or `None` if out-of-bounds.
     ///
     /// Note that out-of-bounds _may_ occur for an index less than
