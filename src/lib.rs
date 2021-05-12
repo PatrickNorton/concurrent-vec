@@ -6,9 +6,11 @@
 //!
 //! [a]: https://www.osti.gov/servlets/purl/1427291
 
+mod data;
 mod descr;
 mod iter;
 
+use crate::data::{Data, PartialData};
 use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value};
 use crate::iter::{IntoIter, Iter};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
@@ -16,13 +18,10 @@ use std::borrow::Borrow;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{array, mem, ptr};
-
-type Data<T> = [MaybeUninit<Atomic<Value<T>>>];
 
 const LIMIT: usize = 32;
 
@@ -44,9 +43,8 @@ pub struct FvdVec<T> {
     // * All values in the array are initialized, though maybe with null.
     // * All `Atomic<Value<T>>` that are non-null and non-`NOT_VALUE` follow
     //   the tag convention.
-    data: Atomic<Data<T>>,
+    data: Atomic<PartialData<T>>,
     length: AtomicUsize,
-    capacity: AtomicUsize,
     phantom: PhantomData<T>,
 }
 
@@ -64,21 +62,16 @@ impl<T> FvdVec<T> {
         FvdVec {
             data: Atomic::null(),
             length: AtomicUsize::new(0),
-            capacity: AtomicUsize::new(0),
             phantom: PhantomData,
         }
     }
 
     /// Creates a `WFVec<T>` with the given capacity.
     pub fn with_capacity(cap: usize) -> FvdVec<T> {
-        let mut data = Owned::<Data<T>>::init(cap);
-        // FIXME: Buffer overflow in crossbeam (array initialized with length
-        //  equal to total allocated bytes, not number of elements)
-        data[..cap].fill_with(|| MaybeUninit::new(Atomic::null()));
+        let data = Owned::init(cap);
         FvdVec {
             data: Atomic::from(data),
             length: AtomicUsize::new(0),
-            capacity: AtomicUsize::new(cap),
             phantom: PhantomData,
         }
     }
@@ -98,7 +91,14 @@ impl<T> FvdVec<T> {
 
     /// Gets the current capacity of the vector.
     pub fn capacity(&self) -> usize {
-        self.capacity.load(Ordering::SeqCst)
+        let guard = &epoch::pin();
+        let data = self.data.load(Ordering::SeqCst, guard);
+        if data.is_null() {
+            0
+        } else {
+            // SAFETY: If `self.data` is not null, it is safe to load.
+            unsafe { data.deref().len() }
+        }
     }
 
     /// Reserves space for `additional` values to be inserted in `self`.
@@ -292,56 +292,52 @@ impl<T> FvdVec<T> {
     /// `c_write`, we know the old value, because it is equal to the value
     /// passed in to `old`.
     pub fn write(&self, index: usize, value: T) -> Result<Ref<'_, T>, T> {
-        if index < self.capacity.load(Ordering::SeqCst) {
-            // SAFETY NOTE: `new` should always point to a valid `Data`. Until it
-            // is placed into the vector, we own it, so we can safely read from it.
-            let mut new = Owned::new(Value::new_data(value));
-            let guard = &epoch::pin();
-            let spot = self.try_get_spot(index, guard);
-            for _failures in 0..LIMIT {
-                let value = match &spot {
-                    Option::Some(spot) => spot.load(Ordering::SeqCst, guard),
-                    Option::None => Shared::null(),
-                };
-                if value.is_null() {
-                    // SAFETY: `new` always points to a valid `Data`. We own
-                    // it, so we can unwrap it from the `Arc`. (When we switch
-                    // to intrusive reference-counting, we can do this without
-                    // the check)
-                    return Result::Err(
-                        Arc::try_unwrap(unsafe { new.into_box().into_data().val })
-                            .unwrap_or_else(|_| unreachable!()),
-                    );
-                } else if is_descr(value) {
-                    // SAFETY: This is a valid descriptor, as just checked, and
-                    // it follows the tag convention, so `is_descr` is a valid
-                    // check.
-                    unsafe { Descriptor::complete_unchecked(value, index, self) };
-                } else {
-                    // If spot was not null, the first branch would have been
-                    // taken.
-                    match spot.unwrap().compare_exchange(
-                        value,
-                        new,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                        guard,
-                    ) {
-                        Result::Ok(_) => {
-                            // SAFETY: `value` was taken from the vector and is
-                            // neither null nor a descriptor, so therefore it
-                            // must be a valid `Data`.
-                            let value = unsafe { value.deref().as_data().clone() };
-                            return Result::Ok(Ref::new(self, value));
-                        }
-                        Result::Err(err) => new = err.new,
+        // SAFETY NOTE: `new` should always point to a valid `Data`. Until it
+        // is placed into the vector, we own it, so we can safely read from it.
+        let mut new = Owned::new(Value::new_data(value));
+        let guard = &epoch::pin();
+        let spot = self.try_get_spot(index, guard);
+        for _failures in 0..LIMIT {
+            let value = match &spot {
+                Option::Some(spot) => spot.load(Ordering::SeqCst, guard),
+                Option::None => Shared::null(),
+            };
+            if value.is_null() {
+                // SAFETY: `new` always points to a valid `Data`. We own
+                // it, so we can unwrap it from the `Arc`. (When we switch
+                // to intrusive reference-counting, we can do this without
+                // the check)
+                return Result::Err(
+                    Arc::try_unwrap(unsafe { new.into_box().into_data().val })
+                        .unwrap_or_else(|_| unreachable!()),
+                );
+            } else if is_descr(value) {
+                // SAFETY: This is a valid descriptor, as just checked, and
+                // it follows the tag convention, so `is_descr` is a valid
+                // check.
+                unsafe { Descriptor::complete_unchecked(value, index, self) };
+            } else {
+                // If spot was not null, the first branch would have been
+                // taken.
+                match spot.unwrap().compare_exchange(
+                    value,
+                    new,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                ) {
+                    Result::Ok(_) => {
+                        // SAFETY: `value` was taken from the vector and is
+                        // neither null nor a descriptor, so therefore it
+                        // must be a valid `Data`.
+                        let value = unsafe { value.deref().as_data().clone() };
+                        return Result::Ok(Ref::new(self, value));
                     }
+                    Result::Err(err) => new = err.new,
                 }
             }
-            todo!("return announce_op(WriteOp(index, new))")
-        } else {
-            Result::Err(value)
         }
+        todo!("return announce_op(WriteOp(index, new))")
     }
 
     /// Inserts the value at the given index.
@@ -377,15 +373,7 @@ impl<T> FvdVec<T> {
         } else {
             // SAFETY: If `self.data` is not null, it is safe to load.
             // FIXME: See `self.get_spot`.
-            match unsafe { data.deref() }.get(index) {
-                // SAFETY: The reference won't outlive the guard, so it can't
-                // get destroyed accidentally. Furthermore, all data in
-                // `self.data` is initialized, so we can deref `as_ptr()`.
-                Option::Some(x) if self.capacity.load(Ordering::SeqCst) > index => unsafe {
-                    Option::Some(&*x.as_ptr())
-                },
-                _ => Option::None,
-            }
+            unsafe { data.deref() }.get(index).map(|x| &*x)
         }
     }
 
@@ -401,31 +389,22 @@ impl<T> FvdVec<T> {
                 match self.resize(4, data, guard) {
                     // SAFETY: We know that the data is initialized, and we can
                     // thus send a reference to it.
-                    Result::Ok(x) => return unsafe { &*x.deref()[index].as_ptr() },
+                    Result::Ok(x) => return unsafe { &x.deref()[index] },
                     Result::Err(_) => {}
                 }
             } else {
                 // SAFETY: If `self.data` is not null, it is safe to load.
-                // FIXME: Because crossbeam still gets the array length wrong,
-                //  this can cause UB if called on a position beyond the array
-                //  length. This should be fixed to use `self.capacity` in a
-                //  thread-safe manner.
-                // FIXME NOTE: The `self.capacity.load()` patch will work in
-                //  single-threaded environments, but with multiple threads, it may
-                //  not, which will still cause UB.
                 let slice = unsafe { data.deref() };
                 match slice.get(index) {
                     // SAFETY: The reference won't outlive the guard, so it can't
                     // get destroyed accidentally. Furthermore, all data in
                     // `self.data` is initialized, so we can deref `as_ptr()`.
-                    Option::Some(x) if self.capacity.load(Ordering::SeqCst) > index => unsafe {
-                        return &*x.as_ptr();
-                    },
+                    Option::Some(x) => return &x,
                     _ => {
                         match self.resize(slice.len().next_power_of_two(), data, guard) {
                             // SAFETY: We know that the data is initialized,
                             // and we can thus send a reference to it.
-                            Result::Ok(x) => return unsafe { &*x.deref()[index].as_ptr() },
+                            Result::Ok(x) => return unsafe { &x.deref()[index] },
                             Result::Err(_) => {}
                         }
                     }
@@ -437,16 +416,11 @@ impl<T> FvdVec<T> {
     fn resize<'a>(
         &self,
         new_size: usize,
-        self_data: Shared<Data<T>>,
+        self_data: Shared<PartialData<T>>,
         guard: &'a Guard,
-    ) -> Result<Shared<'a, Data<T>>, ()> {
+    ) -> Result<Shared<'a, PartialData<T>>, ()> {
         if self_data.is_null() {
-            let mut new_data = Owned::<Data<T>>::init(new_size);
-            // FIXME: Size bug
-            new_data[..new_size].fill_with(|| MaybeUninit::new(Atomic::null()));
-            self.capacity
-                .compare_exchange(0, new_size, Ordering::SeqCst, Ordering::SeqCst)
-                .map_err(|_| ())?;
+            let new_data = Owned::<PartialData<T>>::init(new_size);
             match self.data.compare_exchange(
                 self_data,
                 new_data,
@@ -455,7 +429,6 @@ impl<T> FvdVec<T> {
                 guard,
             ) {
                 Result::Ok(x) => Result::Ok(x),
-                // FIXME: Reset capacity
                 Result::Err(_) => Result::Err(()),
             }
         } else {
@@ -479,70 +452,66 @@ impl<T: PartialEq> FvdVec<T> {
     /// If the value was equal, a [`Ref`] to the newly-placed value is
     /// returned. If not, the new value is returned intact.
     pub fn c_write(&self, index: usize, old: &T, new: T) -> Result<Ref<'_, T>, T> {
-        if index < self.capacity.load(Ordering::SeqCst) {
-            // SAFETY NOTE: `new` should always point to a valid `Data`. Until it
-            // is placed into the vector, we own it, so we can safely read from it.
-            let mut new = Owned::new(Value::new_data(new));
-            let guard = &epoch::pin();
-            let spot = self.try_get_spot(index, guard);
-            for _failures in 0..LIMIT {
-                let value = match &spot {
-                    Option::Some(spot) => spot.load(Ordering::SeqCst, guard),
-                    Option::None => Shared::null(),
-                };
-                if value.is_null() {
-                    // SAFETY: `new` always points to a valid `Data`. We own
-                    // it, so we can unwrap it from the `Arc`. (When we switch
-                    // to intrusive reference-counting, we can do this without
-                    // the check)
+        // SAFETY NOTE: `new` should always point to a valid `Data`. Until it
+        // is placed into the vector, we own it, so we can safely read from it.
+        let mut new = Owned::new(Value::new_data(new));
+        let guard = &epoch::pin();
+        let spot = self.try_get_spot(index, guard);
+        for _failures in 0..LIMIT {
+            let value = match &spot {
+                Option::Some(spot) => spot.load(Ordering::SeqCst, guard),
+                Option::None => Shared::null(),
+            };
+            if value.is_null() {
+                // SAFETY: `new` always points to a valid `Data`. We own
+                // it, so we can unwrap it from the `Arc`. (When we switch
+                // to intrusive reference-counting, we can do this without
+                // the check)
+                return Result::Err(
+                    Arc::try_unwrap(unsafe { new.into_box().into_data().val })
+                        .unwrap_or_else(|_| unreachable!()),
+                );
+            } else if is_descr(value) {
+                // SAFETY: This is a valid descriptor, as just checked, and
+                // it follows the tag convention, so `is_descr` is a valid
+                // check.
+                unsafe { Descriptor::complete_unchecked(value, index, self) };
+            } else {
+                // SAFETY: We know `value` is safe to dereference
+                // because it came from `self` and is neither null nor a
+                // descriptor; thus, it must point to valid data.
+                let val = unsafe { value.deref().as_data() };
+                if old == &**val {
+                    // If spot was not null, the first branch would have
+                    // been taken.
+                    match spot.unwrap().compare_exchange(
+                        value,
+                        new,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        guard,
+                    ) {
+                        Result::Ok(val) => {
+                            // SAFETY: `val` comes from `new`, which still
+                            // points to a valid `Data`.
+                            let value = unsafe { val.deref().as_data().clone() };
+                            return Result::Ok(Ref::new(self, value));
+                        }
+                        Result::Err(err) => new = err.new,
+                    }
+                } else {
+                    // SAFETY: `new` always points to a valid `Data`. We
+                    // own it, so we can unwrap it from the `Arc`. (When we
+                    // switch to intrusive reference-counting, we can do
+                    // this without the check)
                     return Result::Err(
                         Arc::try_unwrap(unsafe { new.into_box().into_data().val })
                             .unwrap_or_else(|_| unreachable!()),
                     );
-                } else if is_descr(value) {
-                    // SAFETY: This is a valid descriptor, as just checked, and
-                    // it follows the tag convention, so `is_descr` is a valid
-                    // check.
-                    unsafe { Descriptor::complete_unchecked(value, index, self) };
-                } else {
-                    // SAFETY: We know `value` is safe to dereference
-                    // because it came from `self` and is neither null nor a
-                    // descriptor; thus, it must point to valid data.
-                    let val = unsafe { value.deref().as_data() };
-                    if old == &**val {
-                        // If spot was not null, the first branch would have
-                        // been taken.
-                        match spot.unwrap().compare_exchange(
-                            value,
-                            new,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                            guard,
-                        ) {
-                            Result::Ok(val) => {
-                                // SAFETY: `val` comes from `new`, which still
-                                // points to a valid `Data`.
-                                let value = unsafe { val.deref().as_data().clone() };
-                                return Result::Ok(Ref::new(self, value));
-                            }
-                            Result::Err(err) => new = err.new,
-                        }
-                    } else {
-                        // SAFETY: `new` always points to a valid `Data`. We
-                        // own it, so we can unwrap it from the `Arc`. (When we
-                        // switch to intrusive reference-counting, we can do
-                        // this without the check)
-                        return Result::Err(
-                            Arc::try_unwrap(unsafe { new.into_box().into_data().val })
-                                .unwrap_or_else(|_| unreachable!()),
-                        );
-                    }
                 }
             }
-            todo!("return announce_op(CWriteOp(index, old, new))")
-        } else {
-            Result::Err(new)
         }
+        todo!("return announce_op(CWriteOp(index, old, new))")
     }
 }
 
@@ -614,7 +583,6 @@ impl<T> IntoIterator for FvdVec<T> {
         unsafe {
             let data = mem::replace(&mut self.data, Atomic::null());
             let end = mem::replace(self.length.get_mut(), 0);
-            *self.capacity.get_mut() = 0;
             mem::forget(self);
             IntoIter::from_parts(data.into_owned(), end)
         }
@@ -632,14 +600,13 @@ impl<'a, T> IntoIterator for &'a FvdVec<T> {
 
 impl<T, const N: usize> From<[T; N]> for FvdVec<T> {
     fn from(x: [T; N]) -> Self {
-        let mut data = Owned::<Data<T>>::init(N);
+        let mut data = Owned::<PartialData<T>>::init(N);
         for (i, val) in array::IntoIter::new(x).enumerate() {
-            data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
+            data[i] = Atomic::new(Value::new_data(val));
         }
         FvdVec {
             data: Atomic::from(data),
             length: AtomicUsize::new(N),
-            capacity: AtomicUsize::new(N),
             phantom: PhantomData,
         }
     }
@@ -654,14 +621,13 @@ impl<T> From<Box<[T]>> for FvdVec<T> {
 impl<T> From<Vec<T>> for FvdVec<T> {
     fn from(x: Vec<T>) -> Self {
         let len = x.len();
-        let mut data = Owned::<Data<T>>::init(len);
+        let mut data = Owned::<PartialData<T>>::init(len);
         for (i, val) in x.into_iter().enumerate() {
-            data[i] = MaybeUninit::new(Atomic::new(Value::new_data(val)));
+            data[i] = Atomic::new(Value::new_data(val));
         }
         FvdVec {
             data: Atomic::from(data),
             length: AtomicUsize::new(len),
-            capacity: AtomicUsize::new(len),
             phantom: PhantomData,
         }
     }
@@ -670,7 +636,7 @@ impl<T> From<Vec<T>> for FvdVec<T> {
 struct FromIterHelper<T> {
     // SAFETY: All data in this up to `self.next_elem` is initialized with a
     // `Value` that has been created with `Value::new_data()`.
-    data: Owned<Data<T>>,
+    data: Owned<PartialData<T>>,
     // SAFETY: `next_elem` always points to the first point in the slice that
     // is not properly initialized.
     next_elem: usize,
@@ -687,7 +653,7 @@ impl<T> FromIterHelper<T> {
     pub fn push(&mut self, value: T) {
         if self.next_elem >= self.data.len() {
             let new_cap = (self.data.len() + 1).next_power_of_two();
-            let mut new_data = Owned::<Data<T>>::init(new_cap);
+            let mut new_data = Owned::<PartialData<T>>::init(new_cap);
             for (to, from) in new_data.iter_mut().zip(self.data.iter()) {
                 // SAFETY: We're transferring data from the old value
                 // (returning it to its previous, uninit state), and
@@ -701,11 +667,11 @@ impl<T> FromIterHelper<T> {
             self.data = new_data;
         }
         // As promised, initialized properly.
-        self.data[self.next_elem] = MaybeUninit::new(Atomic::new(Value::new_data(value)));
+        self.data[self.next_elem] = Atomic::new(Value::new_data(value));
         self.next_elem += 1;
     }
 
-    pub fn take(mut self) -> (Owned<Data<T>>, usize) {
+    pub fn take(mut self) -> (Owned<PartialData<T>>, usize) {
         // SAFETY: Not necessarily unsafe, but this does obey all the given
         // safety requirements of the type. The data is replaced with a slice
         // of length 0, and next_elem points at 0, so no uninitialized or
@@ -729,7 +695,7 @@ impl<T> Drop for FromIterHelper<T> {
             // Also, reading from `MaybeUninit` is safe, as long as we don't
             // call `assume_init` on it later (which we won't).
             unsafe {
-                let data = ptr::read(val).assume_init().into_owned();
+                let data = ptr::read(val).into_owned();
                 debug_assert_eq!(data.tag(), 0);
                 let data = data.into_box().into_data();
                 drop(data);
@@ -746,12 +712,10 @@ impl<T> FromIterator<T> for FvdVec<T> {
         for val in iterator {
             helper.push(val)
         }
-        let capacity = helper.data.len();
         let (data, length) = helper.take();
         FvdVec {
             data: Atomic::from(data),
             length: AtomicUsize::new(length),
-            capacity: AtomicUsize::new(capacity),
             phantom: PhantomData,
         }
     }
@@ -778,14 +742,10 @@ impl<T> Drop for FvdVec<T> {
         // sure nobody has modified it in the meantime.
         let length = *self.length.get_mut();
         for value in &unsafe { data.into_owned().deref() }[..length] {
-            // SAFETY: Because we can't turn this slice into a box, as it is
-            // unsized, we have to read it from the slice before we can assume
-            // anything. Furthermore, it is guaranteed that all values up to
-            // self.length are initialized (if only with null), so calling
-            // assume_init is safe. Furthermore, since we (still) own the data
+            // SAFETY: Since we (still) own the data
             // structure, we can turn it into an Owned.
             let value = unsafe {
-                let value = ptr::read(value).assume_init();
+                let value = value.clone();
                 if value
                     .load(Ordering::Relaxed, epoch::unprotected())
                     .is_null()

@@ -1,13 +1,13 @@
+use crate::data::PartialData;
 use crate::descr::{Value, ValueEnum};
-use crate::{Data, FvdVec, Ref};
+use crate::{FvdVec, Ref};
 use crossbeam_epoch::{self as epoch, Owned};
 use std::iter::FusedIterator;
-use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub struct IntoIter<T> {
-    data: Owned<Data<T>>,
+    data: Owned<PartialData<T>>,
     next: usize,
     end: usize,
 }
@@ -24,7 +24,7 @@ impl<T> IntoIter<T> {
     /// * `data` must be initialized from 0 to `end`.
     /// * All `Atomic`s in `data` must follow the tag convention.
     /// * Any initialized values in slots `end..` will not be dropped.
-    pub unsafe fn from_parts(data: Owned<Data<T>>, end: usize) -> IntoIter<T> {
+    pub unsafe fn from_parts(data: Owned<PartialData<T>>, end: usize) -> IntoIter<T> {
         IntoIter { data, next: 0, end }
     }
 }
@@ -45,13 +45,11 @@ impl<T> Iterator for IntoIter<T> {
             } else {
                 // SAFETY: This is safe because:
                 // * All values less that `self.end` are initialized.
-                // * We can ptr::read from the `MaybeUninit` so long as we
-                //   don't use it afterwards (we don't).
                 // * We own the struct, so we can turn the values into `Owned`.
                 // * The `Owned` we get follows the tag convention for values,
                 //   so turning it into an enum is safe.
                 unsafe {
-                    let atomic = ptr::read(&self.data[self.next]).assume_init();
+                    let atomic = self.data[self.next].clone();
                     // Skip over null values. There should be an easier way to
                     // do this, but there isn't. We can use `unprotected`
                     // because we have a mutable reference, so it won't be
