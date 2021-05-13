@@ -13,7 +13,7 @@ mod iter;
 use crate::data::{DataShared, PartialData};
 use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value, RESIZED};
 use crate::iter::{IntoIter, Iter};
-use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Pointer, Shared};
 use std::borrow::Borrow;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
@@ -162,25 +162,9 @@ impl<T> FvdVec<T> {
                         let result = unsafe { Descriptor::complete_unchecked(desc, pos, &self) };
                         if result {
                             self.increment_size();
-                            // SAFETY: The guard has fulfilled its purpose, so
-                            // it is no longer accessible from the vector. As
-                            // such, no other thread can get it after it is
-                            // destroyed. Since we put the guard into the
-                            // vector, we are the ones responsible for getting
-                            // rid of it.
-                            // NOTE: We can't use `value` from here on out,
-                            // because the descriptor took it.
-                            unsafe { Value::defer_drop(desc, guard) };
                             return;
                         } else {
                             pos -= 1;
-                            // SAFETY: The guard has fulfilled its purpose, so
-                            // it is no longer accessible from the vector. As
-                            // such, no other thread can get it after it is
-                            // destroyed. Since we put the guard into the
-                            // vector, we are the ones responsible for getting
-                            // rid of it.
-                            unsafe { Value::defer_drop(desc, guard) };
                             // SAFETY: PushDescr is always a Value created from
                             // `Value::new_data`. We can still use `value`,
                             // because the descriptor didn't take it.
@@ -490,7 +474,7 @@ impl<T> FvdVec<T> {
             // SAFETY: We know `old` is no longer newly accessible, so it is
             // safe to drop.
             unsafe {
-                guard.defer_unchecked(|| drop(old.into_owned()));
+                guard.defer_unchecked(move || drop(old.into_owned()));
             }
         }
     }
