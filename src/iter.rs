@@ -3,6 +3,7 @@ use crate::descr::{Value, ValueEnum};
 use crate::{FvdVec, Ref};
 use crossbeam_epoch::{self as epoch, Owned};
 use std::iter::FusedIterator;
+use std::mem::take;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -49,7 +50,7 @@ impl<T> Iterator for IntoIter<T> {
                 // * The `Owned` we get follows the tag convention for values,
                 //   so turning it into an enum is safe.
                 unsafe {
-                    let atomic = self.data[self.next].clone();
+                    let atomic = take(&mut self.data[self.next]);
                     // Skip over null values. There should be an easier way to
                     // do this, but there isn't. We can use `unprotected`
                     // because we have a mutable reference, so it won't be

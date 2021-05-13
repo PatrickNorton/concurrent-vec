@@ -13,11 +13,12 @@ mod iter;
 use crate::data::{DataShared, PartialData};
 use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value, RESIZED};
 use crate::iter::{IntoIter, Iter};
-use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Pointer, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::borrow::Borrow;
 use std::fmt::{self, Debug, Formatter};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
+use std::mem::take;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -356,7 +357,6 @@ impl<T> FvdVec<T> {
             Option::None
         } else {
             // SAFETY: If `self.data` is not null, it is safe to load.
-            // FIXME: See `self.get_spot`.
             unsafe { data.deref() }.get(index).map(|x| &*x)
         }
     }
@@ -732,15 +732,8 @@ impl<T> FromIterHelper<T> {
         if self.next_elem >= self.data.len() {
             let new_cap = (self.data.len() + 1).next_power_of_two();
             let mut new_data = Owned::<PartialData<T>>::init(new_cap);
-            for (to, from) in new_data.iter_mut().zip(self.data.iter()) {
-                // SAFETY: We're transferring data from the old value
-                // (returning it to its previous, uninit state), and
-                // writing it directly into the new value. Note that
-                // whether or not `from` is initialized has no effect on
-                // the safety of this code.
-                // Furthermore, since this can't panic, there's no
-                // chance of dropping uninitialized data.
-                *to = unsafe { ptr::read(from) }
+            for (to, from) in new_data.iter_mut().zip(self.data.iter_mut()) {
+                *to = take(from);
             }
             self.data = new_data;
         }
@@ -766,14 +759,11 @@ impl<T> Drop for FromIterHelper<T> {
         // don't cause UB by dropping something we shouldn't.
         let next_elem = mem::replace(&mut self.next_elem, 0);
         for val in &mut self.data[..next_elem] {
-            // SAFETY: Every value up to `self.next_elem` is initialized
-            // properly, as per the contract in the header. Furthermore, as we
-            // are the only ones with access to this struct (see the
-            // `&mut self`), we can turn it into an `Owned` to drop it.
-            // Also, reading from `MaybeUninit` is safe, as long as we don't
-            // call `assume_init` on it later (which we won't).
+            // SAFETY: Since we are the only ones with access to this struct
+            // (see the `&mut self`), we can turn it into an `Owned` to drop
+            // it.
             unsafe {
-                let data = ptr::read(val).into_owned();
+                let data = mem::take(val).into_owned();
                 debug_assert_eq!(data.tag(), 0);
                 let data = data.into_box().into_data();
                 drop(data);
