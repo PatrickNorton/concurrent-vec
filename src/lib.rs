@@ -468,14 +468,14 @@ impl<T> FvdVec<T> {
                 Ordering::SeqCst,
                 guard,
             );
-            new_data
-                .get_previous()
-                .swap(Shared::null(), Ordering::SeqCst, guard);
-            // SAFETY: We know `old` is no longer newly accessible, so it is
-            // safe to drop.
-            unsafe {
-                guard.defer_unchecked(move || drop(old.into_owned()));
-            }
+        }
+        new_data
+            .get_previous()
+            .swap(Shared::null(), Ordering::SeqCst, guard);
+        // SAFETY: We know `old` is no longer newly accessible, so it is
+        // safe to drop.
+        unsafe {
+            guard.defer_unchecked(move || drop(old.into_owned()));
         }
     }
 
@@ -850,7 +850,8 @@ impl<T> Borrow<T> for Ref<'_, T> {
 #[cfg(test)]
 mod tests {
     use crate::FvdVec;
-    use std::array;
+    use std::sync::Arc;
+    use std::{array, thread};
 
     #[test]
     fn test_new() {
@@ -932,5 +933,33 @@ mod tests {
         vec.push(2);
         assert_eq!(*vec.get(0).unwrap(), 1);
         assert_eq!(*vec.get(1).unwrap(), 2);
+    }
+
+    #[test]
+    fn concurrent_push() {
+        let vec = Arc::new(FvdVec::new());
+        let v1 = vec.clone();
+        let t1 = thread::spawn(move || v1.push(0));
+        let v2 = vec.clone();
+        let t2 = thread::spawn(move || v2.push(0));
+        t1.join().unwrap();
+        t2.join().unwrap();
+        assert_eq!(vec.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_pop() {
+        let vec = Arc::new(FvdVec::from([0, 1]));
+        let v1 = vec.clone();
+        let t1 = thread::spawn(move || {
+            v1.pop().unwrap();
+        });
+        let v2 = vec.clone();
+        let t2 = thread::spawn(move || {
+            v2.pop().unwrap();
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        assert_eq!(vec.len(), 0);
     }
 }
