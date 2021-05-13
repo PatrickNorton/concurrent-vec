@@ -542,11 +542,14 @@ fn try_increment(num: &AtomicUsize) -> bool {
 /// there is no way that a static `u8` is going to alias with a non-static
 /// `Value<T>` under any circumstances.
 mod opaque {
+    use crate::descr::Align4;
     use crossbeam_epoch::{Pointer, Shared};
 
-    static NOT_COPIED: u8 = 0;
+    static NOT_COPIED: Opaque = Opaque(0, Align4);
+
+    struct Opaque(u8, Align4);
 
     pub fn not_copied<'a, T>() -> Shared<'a, T> {
-        unsafe { Shared::from_usize(&NOT_COPIED as *const u8 as usize) }
+        unsafe { Shared::from_usize(&NOT_COPIED as *const _ as usize) }
     }
 }
