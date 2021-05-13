@@ -284,6 +284,9 @@ impl<T> PushDescr<T> {
 }
 
 impl<T> PopDescr<T> {
+    const SUCCESS_TAG: usize = 0;
+    const FAILED_TAG: usize = 1;
+
     pub fn new() -> PopDescr<T> {
         PopDescr {
             child: Atomic::null(),
@@ -315,15 +318,13 @@ impl<T> PopDescr<T> {
     }
 
     pub fn complete(&self, pos: usize, value: &FvdVec<T>, shared_self: Shared<Value<T>>) -> bool {
-        const SUCCESS_TAG: usize = 0;
-        const FAILED_TAG: usize = 1;
         let mut failures = 0;
         let guard = &epoch::pin();
         let spot = value.get_spot(pos - 1, guard);
-        while self.child.load(Ordering::SeqCst, guard).is_null() {
+        while self.child_is_null(guard) {
             failures += 1;
             if failures > LIMIT {
-                let failed = Shared::null().with_tag(FAILED_TAG);
+                let failed = Shared::null().with_tag(Self::FAILED_TAG);
                 let _ = self.child.compare_exchange(
                     Shared::null(),
                     failed,
@@ -334,7 +335,7 @@ impl<T> PopDescr<T> {
             } else {
                 let expected = spot.load(Ordering::SeqCst, guard);
                 if expected.is_null() {
-                    let failed = Shared::null().with_tag(FAILED_TAG);
+                    let failed = Shared::null().with_tag(Self::FAILED_TAG);
                     let _ = self.child.compare_exchange(
                         Shared::null(),
                         failed,
@@ -398,7 +399,12 @@ impl<T> PopDescr<T> {
                 }
             }
         }
-        self.child.load(Ordering::SeqCst, guard).tag() == SUCCESS_TAG
+        self.child.load(Ordering::SeqCst, guard).tag() == Self::SUCCESS_TAG
+    }
+
+    fn child_is_null(&self, guard: &Guard) -> bool {
+        let child = self.child.load(Ordering::SeqCst, guard);
+        child.is_null() && child.tag() == Self::SUCCESS_TAG
     }
 }
 
