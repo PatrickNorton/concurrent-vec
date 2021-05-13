@@ -10,8 +10,8 @@ mod data;
 mod descr;
 mod iter;
 
-use crate::data::{Data, PartialData};
-use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value};
+use crate::data::{DataShared, PartialData};
+use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value, RESIZED};
 use crate::iter::{IntoIter, Iter};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::borrow::Borrow;
@@ -389,7 +389,7 @@ impl<T> FvdVec<T> {
                 match self.resize(4, data, guard) {
                     // SAFETY: We know that the data is initialized, and we can
                     // thus send a reference to it.
-                    Result::Ok(x) => return unsafe { &x.deref()[index] },
+                    Result::Ok(x) => return Self::get_element(x, index, guard),
                     Result::Err(_) => {}
                 }
             } else {
@@ -401,10 +401,10 @@ impl<T> FvdVec<T> {
                     // `self.data` is initialized, so we can deref `as_ptr()`.
                     Option::Some(x) => return &x,
                     _ => {
-                        match self.resize(slice.len().next_power_of_two(), data, guard) {
+                        match self.resize((index + 1).next_power_of_two(), data, guard) {
                             // SAFETY: We know that the data is initialized,
                             // and we can thus send a reference to it.
-                            Result::Ok(x) => return unsafe { &x.deref()[index] },
+                            Result::Ok(x) => return Self::get_element(x, index, guard),
                             Result::Err(_) => {}
                         }
                     }
@@ -432,7 +432,101 @@ impl<T> FvdVec<T> {
                 Result::Err(_) => Result::Err(()),
             }
         } else {
-            todo!()
+            let mut new_data = {
+                // SAFETY: We own the value through all of this, so we can do
+                // what we want. (This is here because `Owned<T>` doesn't have
+                // an `as_usize` method, so we can't easily get a `Data` out of
+                // it).
+                let data = Owned::<PartialData<T>>::init(new_size).into_shared(guard);
+                unsafe { data.deref_full() }
+                    .get_previous()
+                    .store(self_data, Ordering::SeqCst);
+                unsafe { data.into_owned() }
+            };
+            let old_len = unsafe { self_data.deref().len() };
+            new_data[..old_len].fill_with(|| Atomic::from(Value::not_copied(guard)));
+            match self.data.compare_exchange(
+                self_data,
+                new_data,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                guard,
+            ) {
+                Result::Ok(new_data) => {
+                    Self::copy_elements(self_data, new_data, guard);
+                    Result::Ok(new_data)
+                }
+                Result::Err(err) => {
+                    // SAFETY: If `self.data` is not null, it is safe to dereference
+                    if !err.current.is_null() && unsafe { err.current.deref() }.len() >= new_size {
+                        Result::Ok(err.current)
+                    } else {
+                        Result::Err(())
+                    }
+                }
+            }
+        }
+    }
+
+    fn copy_elements(old: Shared<PartialData<T>>, new: Shared<PartialData<T>>, guard: &Guard) {
+        assert!(!old.is_null());
+        assert!(!new.is_null());
+        // SAFETY: If `old` and `new` are not null, they are safe to
+        // dereference.
+        let old_data = unsafe { old.deref_full() };
+        let new_data = unsafe { new.deref_full() };
+        for (old_val, new_val) in old_data.iter().zip(new_data.iter()) {
+            let old_val = old_val.fetch_or(RESIZED, Ordering::SeqCst, guard);
+            let _ = new_val.compare_exchange(
+                Value::not_copied(guard),
+                old_val,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                guard,
+            );
+            new_data
+                .get_previous()
+                .swap(Shared::null(), Ordering::SeqCst, guard);
+            // SAFETY: We know `old` is no longer newly accessible, so it is
+            // safe to drop.
+            unsafe {
+                guard.defer_unchecked(|| drop(old.into_owned()));
+            }
+        }
+    }
+
+    fn get_element<'a>(
+        shared_data: Shared<'a, PartialData<T>>,
+        index: usize,
+        guard: &Guard,
+    ) -> &'a Atomic<Value<T>> {
+        assert!(!shared_data.is_null());
+        // SAFETY: `shared_data` is not null, so it is safe to dereference.
+        let data = unsafe { shared_data.deref() };
+        let value = &data[index];
+        if value.load(Ordering::SeqCst, guard) == Value::not_copied(guard) {
+            // SAFETY: `shared_data` is not null, so it is safe to dereference.
+            let data = unsafe { shared_data.deref_full() };
+            let old = data.get_previous().load(Ordering::SeqCst, guard);
+            if !old.is_null() {
+                // SAFETY: `old` is not null, so it is safe to dereference.
+                let old_value = unsafe { &old.deref()[index] };
+                let old_val = old_value.fetch_or(RESIZED, Ordering::SeqCst, guard);
+                let _ = value.compare_exchange(
+                    Value::not_copied(guard),
+                    old_val,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                );
+            }
+            assert_ne!(
+                value.load(Ordering::SeqCst, guard),
+                Value::not_copied(guard)
+            );
+            value
+        } else {
+            value
         }
     }
 
@@ -855,5 +949,14 @@ mod tests {
         let vec = FvdVec::new();
         vec.push(0);
         assert_eq!(*vec.get(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn non_empty_resize() {
+        let vec = FvdVec::with_capacity(1);
+        vec.push(1);
+        vec.push(2);
+        assert_eq!(*vec.get(0).unwrap(), 1);
+        assert_eq!(*vec.get(1).unwrap(), 2);
     }
 }

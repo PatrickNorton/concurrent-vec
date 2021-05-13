@@ -1,4 +1,4 @@
-use crate::{Data, FvdVec, LIMIT};
+use crate::{FvdVec, LIMIT};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Pointer, Shared};
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
@@ -8,6 +8,9 @@ use std::sync::Arc;
 const UNDECIDED: u8 = 0;
 const FAILED: u8 = 1;
 const PASSED: u8 = 2;
+
+pub const DESCRIPTOR: usize = 0b01;
+pub const RESIZED: usize = 0b10;
 
 /// A holder for the value in a `FvdVec`.
 ///
@@ -32,7 +35,7 @@ pub enum ValueEnum<T> {
 #[derive(Ord, PartialOrd, Eq, PartialEq)]
 pub struct Node<T> {
     pub val: Arc<T>,
-    _align: Align2,
+    _align: Align4,
 }
 
 pub enum Descriptor<T> {
@@ -64,12 +67,12 @@ pub struct PopSubDescr<T> {
     // SAFETY: `value` must follow the tag convention and contain a valid
     // Value.
     value: Atomic<Value<T>>,
-    _align: Align2,
+    _align: Align4,
 }
 
-#[repr(align(2))]
+#[repr(align(4))]
 #[derive(Default, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-struct Align2;
+struct Align4;
 
 impl<T> Value<T> {
     pub fn new_data(value: T) -> Value<T> {
@@ -82,6 +85,10 @@ impl<T> Value<T> {
         Value {
             push: ManuallyDrop::new(value),
         }
+    }
+
+    pub fn not_copied(_: &Guard) -> Shared<'_, Value<T>> {
+        opaque::not_copied()
     }
 
     /// Takes the `Value` and adds it to the list of things to be garbage-
@@ -131,7 +138,7 @@ impl<T> Node<T> {
     pub fn new(value: T) -> Node<T> {
         Node {
             val: Arc::new(value),
-            _align: Align2,
+            _align: Align4,
         }
     }
 }
@@ -507,7 +514,7 @@ pub unsafe fn decompose<T>(value: Shared<Value<T>>) -> Result<&Node<T>, &Descrip
 /// long as it follows the tag convention.
 #[inline]
 pub fn is_descr<T>(current: Shared<Value<T>>) -> bool {
-    current.tag() == 1 && !current.is_null()
+    current.tag() & DESCRIPTOR != 0 && !current.is_null()
 }
 
 /// Increments the given value atomically if it is not 0.
@@ -523,4 +530,23 @@ fn try_increment(num: &AtomicUsize) -> bool {
         }
     })
     .is_ok()
+}
+
+/// A module for implementing the `NOT_COPIED` sentinel pointer.
+///
+/// How this works: We want `NOT_COPIED` to have a unique, known address.
+/// Implementing it as a constant directly could lead to issues, as the value
+/// could alias with another value by accident.
+/// To get around this, we use a non-zero-sized static value.
+/// While Rust's aliasing rules for statics aren't technically well-defined,
+/// there is no way that a static `u8` is going to alias with a non-static
+/// `Value<T>` under any circumstances.
+mod opaque {
+    use crossbeam_epoch::{Pointer, Shared};
+
+    static NOT_COPIED: u8 = 0;
+
+    pub fn not_copied<'a, T>() -> Shared<'a, T> {
+        unsafe { Shared::from_usize(&NOT_COPIED as *const u8 as usize) }
+    }
 }

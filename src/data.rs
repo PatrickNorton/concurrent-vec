@@ -1,5 +1,5 @@
 use crate::descr::Value;
-use crossbeam_epoch::{Atomic, Owned, Pointable, Pointer, Shared};
+use crossbeam_epoch::{Atomic, Pointable, Pointer, Shared};
 use std::alloc;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -20,6 +20,12 @@ struct DataInner<T> {
     previous: Atomic<PartialData<T>>,
     len: usize,
     data: [Atomic<Value<T>>; 0],
+}
+
+impl<'a, T> Data<'a, T> {
+    pub fn get_previous(&self) -> &Atomic<PartialData<T>> {
+        &self.previous
+    }
 }
 
 pub trait DataPointable<T>: Pointable {
