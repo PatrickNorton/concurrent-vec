@@ -11,7 +11,7 @@ mod descr;
 mod iter;
 
 use crate::data::{DataShared, PartialData};
-use crate::descr::{is_descr, Descriptor, Node, PopDescr, PushDescr, Value, RESIZED};
+use crate::descr::{atomic_or, is_descr, Descriptor, Node, PopDescr, PushDescr, Value, RESIZED};
 use crate::iter::{IntoIter, Iter};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::borrow::Borrow;
@@ -495,7 +495,7 @@ impl<T> FvdVec<T> {
             if !old.is_null() {
                 // SAFETY: `old` is not null, so it is safe to dereference.
                 let old_value = unsafe { &old.deref()[index] };
-                let old_val = old_value.fetch_or(RESIZED, Ordering::SeqCst, guard);
+                let old_val = atomic_or(old_value, RESIZED, guard);
                 let _ = value.compare_exchange(
                     Value::not_copied(guard),
                     old_val,

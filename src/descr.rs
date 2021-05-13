@@ -538,6 +538,24 @@ fn try_increment(num: &AtomicUsize) -> bool {
     .is_ok()
 }
 
+/// Does an atomic or operation on the given `Atomic` pointer.
+///
+/// This is an ugly hack because [`Atomic::fetch_or`] doesn't update the tag,
+/// so we have to use a compare-exchange loop instead of just a fetch-or.
+pub fn atomic_or<'a, T>(value: &Atomic<T>, new: usize, guard: &'a Guard) -> Shared<'a, T> {
+    AtomicUsize::new(0).fetch_or(0, Ordering::SeqCst);
+    loop {
+        let shared = value.load(Ordering::SeqCst, guard);
+        // SAFETY: We never actually do anything with this `Shared`, so
+        // creating it should be fine.
+        let new = unsafe { Shared::from_usize(shared.into_usize() | new) };
+        match value.compare_exchange_weak(shared, new, Ordering::SeqCst, Ordering::SeqCst, guard) {
+            Result::Ok(_) => return shared,
+            Result::Err(_) => {}
+        }
+    }
+}
+
 /// A module for implementing the `NOT_COPIED` sentinel pointer.
 ///
 /// How this works: We want `NOT_COPIED` to have a unique, known address.
