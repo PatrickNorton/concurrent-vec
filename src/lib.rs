@@ -228,6 +228,9 @@ impl<T> FvdVec<T> {
                             // must have caused UB too).
                             let value = unsafe { desc.deref().as_descriptor() };
                             let value = value.as_pop().unwrap();
+                            // SAFETY: A `PopDescr` removes itself from the
+                            // vector, so it can't be accessed anymore.
+                            unsafe { Value::defer_drop(desc, guard) };
                             // SAFETY: `value` was just completed, so calling
                             // `get_value` is safe.
                             return Option::Some(Ref::new(
@@ -235,6 +238,9 @@ impl<T> FvdVec<T> {
                                 unsafe { value.get_value(guard) }.clone(),
                             ));
                         } else {
+                            // SAFETY: A `PopDescr` removes itself from the
+                            // vector, so it can't be accessed anymore.
+                            unsafe { Value::defer_drop(desc, guard) };
                             ph = PopDescr::new();
                             pos -= 1;
                         }
@@ -243,6 +249,12 @@ impl<T> FvdVec<T> {
                         ph = PopDescr::new();
                     }
                 }
+            } else if is_descr(expected) {
+                // SAFETY: We know there's a descriptor here, as we just
+                // checked it.
+                unsafe { Descriptor::complete_unchecked(expected, pos, self) };
+            } else {
+                pos += 1;
             }
         }
     }
@@ -961,5 +973,22 @@ mod tests {
         t1.join().unwrap();
         t2.join().unwrap();
         assert_eq!(vec.len(), 0);
+    }
+
+    #[test]
+    fn concurrent_pop_2() {
+        let vec = Arc::new(FvdVec::from([0; 10]));
+        let count = vec.len();
+        let mut threads = Vec::with_capacity(count);
+        for _ in 0..count {
+            let v = vec.clone();
+            threads.push(thread::spawn(move || {
+                v.pop().unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(vec.is_empty());
     }
 }

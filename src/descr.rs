@@ -332,6 +332,14 @@ impl<T> PopDescr<T> {
                     Ordering::SeqCst,
                     guard,
                 );
+                let spot_2 = value.get_spot(pos, guard);
+                let _ = spot_2.compare_exchange(
+                    shared_self,
+                    Shared::null(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    guard,
+                );
             } else {
                 let expected = spot.load(Ordering::SeqCst, guard);
                 if expected.is_null() {
@@ -339,6 +347,14 @@ impl<T> PopDescr<T> {
                     let _ = self.child.compare_exchange(
                         Shared::null(),
                         failed,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        guard,
+                    );
+                    let spot_2 = value.get_spot(pos, guard);
+                    let _ = spot_2.compare_exchange(
+                        shared_self,
+                        Shared::null(),
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                         guard,
