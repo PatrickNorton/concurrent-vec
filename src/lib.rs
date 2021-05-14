@@ -960,6 +960,22 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_push_2() {
+        let count = 10;
+        let vec = Arc::new(FvdVec::with_capacity(count));
+        let mut threads = Vec::with_capacity(count);
+        for i in 0..count {
+            let v = vec.clone();
+            threads.push(thread::spawn(move || v.push(i)));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(vec.len(), count);
+        println!("{:?}", vec);
+    }
+
+    #[test]
     fn concurrent_pop() {
         let vec = Arc::new(FvdVec::from([0, 1]));
         let v1 = vec.clone();
