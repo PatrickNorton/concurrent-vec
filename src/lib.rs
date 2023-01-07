@@ -22,7 +22,7 @@ use std::mem::take;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::{array, mem, ptr};
+use std::{mem, ptr};
 
 const LIMIT: usize = 32;
 
@@ -107,7 +107,7 @@ impl<T> FvdVec<T> {
         // I'm not 100% sure we need the pin here, but let's keep it just in
         // case.
         let guard = &epoch::pin();
-        self.get_spot(self.length.load(Ordering::SeqCst) + additional, &guard);
+        self.get_spot(self.length.load(Ordering::SeqCst) + additional, guard);
     }
 
     /// Appends an element to the end of the vector.
@@ -160,7 +160,7 @@ impl<T> FvdVec<T> {
                         // SAFETY: We know there's a descriptor in this and it
                         // follows the tag convention (b/c we just put it
                         // there).
-                        let result = unsafe { Descriptor::complete_unchecked(desc, pos, &self) };
+                        let result = unsafe { Descriptor::complete_unchecked(desc, pos, self) };
                         if result {
                             self.increment_size();
                             return;
@@ -181,7 +181,7 @@ impl<T> FvdVec<T> {
             } else if is_descr(expected) {
                 // SAFETY: We just checked there's a descriptor and expected
                 // follows the tag convention.
-                unsafe { Descriptor::complete_unchecked(expected, pos, &self) };
+                unsafe { Descriptor::complete_unchecked(expected, pos, self) };
             } else {
                 pos += 1;
             }
@@ -369,7 +369,7 @@ impl<T> FvdVec<T> {
             Option::None
         } else {
             // SAFETY: If `self.data` is not null, it is safe to load.
-            unsafe { data.deref() }.get(index).map(|x| &*x)
+            unsafe { data.deref() }.get(index)
         }
     }
 
@@ -382,11 +382,10 @@ impl<T> FvdVec<T> {
         loop {
             let data = self.data.load(Ordering::SeqCst, guard);
             if data.is_null() {
-                match self.resize(4, data, guard) {
+                if let Result::Ok(x) = self.resize(4, data, guard) {
                     // SAFETY: We know that the data is initialized, and we can
                     // thus send a reference to it.
-                    Result::Ok(x) => return Self::get_element(x, index, guard),
-                    Result::Err(_) => {}
+                    return Self::get_element(x, index, guard);
                 }
             } else {
                 // SAFETY: If `self.data` is not null, it is safe to load.
@@ -395,13 +394,14 @@ impl<T> FvdVec<T> {
                     // SAFETY: The reference won't outlive the guard, so it can't
                     // get destroyed accidentally. Furthermore, all data in
                     // `self.data` is initialized, so we can deref `as_ptr()`.
-                    Option::Some(x) => return &x,
+                    Option::Some(x) => return x,
                     _ => {
-                        match self.resize((index + 1).next_power_of_two(), data, guard) {
+                        if let Result::Ok(x) =
+                            self.resize((index + 1).next_power_of_two(), data, guard)
+                        {
                             // SAFETY: We know that the data is initialized,
                             // and we can thus send a reference to it.
-                            Result::Ok(x) => return Self::get_element(x, index, guard),
-                            Result::Err(_) => {}
+                            return Self::get_element(x, index, guard);
                         }
                     }
                 }
@@ -691,7 +691,7 @@ impl<'a, T> IntoIterator for &'a FvdVec<T> {
 impl<T, const N: usize> From<[T; N]> for FvdVec<T> {
     fn from(x: [T; N]) -> Self {
         let mut data = Owned::<PartialData<T>>::init(N);
-        for (i, val) in array::IntoIter::new(x).enumerate() {
+        for (i, val) in x.into_iter().enumerate() {
             data[i] = Atomic::new(Value::new_data(val));
         }
         FvdVec {
@@ -863,7 +863,7 @@ impl<T> Borrow<T> for Ref<'_, T> {
 mod tests {
     use crate::FvdVec;
     use std::sync::Arc;
-    use std::{array, thread};
+    use std::thread;
 
     #[test]
     fn test_new() {
@@ -889,7 +889,7 @@ mod tests {
     fn into_iter() {
         let values = [0, 1, 2, 3];
         let vec: FvdVec<_> = values.into();
-        for (i, j) in vec.into_iter().zip(array::IntoIter::new(values)) {
+        for (i, j) in vec.into_iter().zip(values) {
             assert_eq!(i, j);
         }
     }

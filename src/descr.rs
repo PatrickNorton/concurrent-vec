@@ -497,7 +497,7 @@ impl<T> Clone for Node<T> {
     fn clone(&self) -> Self {
         Node {
             val: self.val.clone(),
-            _align: self._align.clone(),
+            _align: self._align,
         }
     }
 }
@@ -565,9 +565,11 @@ pub fn atomic_or<'a, T>(value: &Atomic<T>, new: usize, guard: &'a Guard) -> Shar
         // SAFETY: We never actually do anything with this `Shared`, so
         // creating it should be fine.
         let new = unsafe { Shared::from_usize(shared.into_usize() | new) };
-        match value.compare_exchange_weak(shared, new, Ordering::SeqCst, Ordering::SeqCst, guard) {
-            Result::Ok(_) => return shared,
-            Result::Err(_) => {}
+        if value
+            .compare_exchange_weak(shared, new, Ordering::SeqCst, Ordering::SeqCst, guard)
+            .is_ok()
+        {
+            return shared;
         }
     }
 }

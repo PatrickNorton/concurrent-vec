@@ -3,7 +3,7 @@ use crossbeam_epoch::{Atomic, Pointable, Pointer, Shared};
 use std::alloc;
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use std::slice;
+use std::ptr;
 
 pub struct Data<'a, T> {
     previous: &'a Atomic<PartialData<T>>,
@@ -24,7 +24,7 @@ struct DataInner<T> {
 
 impl<'a, T> Data<'a, T> {
     pub fn get_previous(&self) -> &Atomic<PartialData<T>> {
-        &self.previous
+        self.previous
     }
 }
 
@@ -58,13 +58,13 @@ impl<T> Pointable for PartialData<T> {
 
     unsafe fn deref<'a>(ptr: usize) -> &'a Self {
         let array = &*(ptr as *const DataInner<T>);
-        &*(slice::from_raw_parts(array.data.as_ptr() as *const _, array.len) as *const _
+        &*(ptr::slice_from_raw_parts(array.data.as_ptr() as *const _, array.len)
             as *const PartialData<T>)
     }
 
     unsafe fn deref_mut<'a>(ptr: usize) -> &'a mut Self {
         let array = &mut *(ptr as *mut DataInner<T>);
-        &mut *(slice::from_raw_parts_mut(array.data.as_mut_ptr() as *mut _, array.len) as *mut _
+        &mut *(ptr::slice_from_raw_parts_mut(array.data.as_mut_ptr() as *mut _, array.len)
             as *mut PartialData<T>)
     }
 
@@ -112,7 +112,7 @@ impl<T> Deref for Data<'_, T> {
     type Target = [Atomic<Value<T>>];
 
     fn deref(&self) -> &Self::Target {
-        &self.values
+        self.values
     }
 }
 
